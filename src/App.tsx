@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { db, User } from './services/db';
+import { db, User, initializeDbConnection } from './services/db';
 
 // Import Pages
 import Landing from './pages/Landing';
@@ -84,11 +84,14 @@ export default function App() {
   };
 
   useEffect(() => {
-    // Check session login state
-    const user = db.getCurrentUser();
-    if (user) {
-      setCurrentUser(user);
-    }
+    // Start backend connection sync
+    initializeDbConnection().then(() => {
+      // Check session login state
+      const user = db.getCurrentUser();
+      if (user) {
+        setCurrentUser(user);
+      }
+    });
 
     syncRoute();
     window.addEventListener('hashchange', syncRoute);

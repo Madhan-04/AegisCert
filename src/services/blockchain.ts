@@ -1,4 +1,5 @@
 // Real-world Smart Contract & EVM Explorer Simulation Layer
+import { db } from './db';
 
 export interface Transaction {
   hash: string;
@@ -164,16 +165,16 @@ export const blockchain = {
   sha256Sync,
   
   getLedger: (): Block[] => {
-    const stored = localStorage.getItem('csv_blockchain');
-    if (!stored) {
-      localStorage.setItem('csv_blockchain', JSON.stringify(DEFAULT_LEDGER));
+    const list = db.getBlockchainLedger();
+    if (list.length === 0) {
+      db.setBlockchainLedger(DEFAULT_LEDGER);
       return DEFAULT_LEDGER;
     }
-    return JSON.parse(stored);
+    return list;
   },
 
   setLedger: (ledger: Block[]) => {
-    localStorage.setItem('csv_blockchain', JSON.stringify(ledger));
+    db.setBlockchainLedger(ledger);
   },
 
   // Mine a transaction into a new block, mimicking EVM RPC calls
@@ -226,7 +227,7 @@ export const blockchain = {
 
     let nonceVal = 0;
     let blockHash = '';
-    const difficultyPrefix = '0000'; // Mimic Proof of Work
+    const difficultyPrefix = '00'; // Mimic Proof of Work (reduced difficulty for 144Hz real-time responsiveness)
     const baseContent = blockNumber + timestamp + parentHash + JSON.stringify(transaction);
 
     return new Promise((resolve) => {

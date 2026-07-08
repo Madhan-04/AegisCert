@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { db, User } from '../services/db';
+import { db, User, hashPassword } from '../services/db';
 import { blockchain } from '../services/blockchain';
 import { FileText, User as UserIcon, GraduationCap, Award, RefreshCw, Cpu, CheckCircle2, ShieldCheck, AlertCircle } from 'lucide-react';
 import confetti from 'canvas-confetti';
@@ -118,6 +118,43 @@ export default function CertificateIssuance({ navigate }: CertificateIssuancePro
         const currentCerts = db.getCertificates();
         currentCerts.unshift(certificate);
         db.setCertificates(currentCerts);
+
+        // Auto-register student user account so they can log in immediately
+        const allUsers = db.getUsers();
+        const studentUsername = rollNo.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const studentExists = allUsers.some(u => u.username === studentUsername || u.rollNo === rollNo);
+        
+        if (!studentExists) {
+          const newStudentUser = {
+            id: `usr-stud-${Math.random().toString(36).substring(2, 9)}`,
+            username: studentUsername,
+            password: hashPassword('password123'), // Default password
+            role: 'student' as const,
+            name: studentName,
+            email: `${studentName.toLowerCase().replace(/[^a-z0-9]/g, '')}@student.edu`,
+            institutionId: currentUser?.institutionId || '',
+            institutionName: currentUser?.institutionName || '',
+            rollNo: rollNo,
+            regNo: regNo,
+            department: department,
+            batch: yearOfPassout,
+            contact: '+1 (555) 000-0000',
+            enrolledAt: new Date().toISOString()
+          };
+          allUsers.push(newStudentUser);
+          db.setUsers(allUsers);
+          
+          if (currentUser) {
+            db.addAuditLog(
+              currentUser.id,
+              currentUser.name,
+              'institution',
+              'STUDENT_REGISTER',
+              `Auto-registered login credentials for student: ${studentName} (Username/RollNo: ${studentUsername})`,
+              'success'
+            );
+          }
+        }
 
         // Add audit logs
         if (currentUser) {

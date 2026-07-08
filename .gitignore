@@ -13,6 +13,12 @@ dist/
 # Environment Variables
 .env
 .env.*
+!.env.example
+
+# SQLite Database Files
+*.sqlite
+*.sqlite3
+*.db
 
 # OS Files
 .DS_Store

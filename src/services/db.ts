@@ -1,4 +1,5 @@
 // Cryptographically Secured Local Storage Database Service with OTP Verification
+import { supabase } from './supabase';
 
 export interface User {
   id: string;
@@ -394,6 +395,71 @@ const DEFAULT_INSTITUTIONS: Institution[] = [
     secondaryColor: '#4F46E5',
     campusCount: 3,
     departmentCount: 4
+  },
+  { 
+    id: 'inst-stanford', 
+    name: 'Stanford University', 
+    regNo: 'US-STAN-1003', 
+    email: 'credentials@stanford.edu', 
+    status: 'approved', 
+    createdAt: '2026-06-20T08:00:00Z',
+    logoUrl: '/logo.jpg',
+    primaryColor: '#8C1515',
+    secondaryColor: '#4F46E5',
+    campusCount: 4,
+    departmentCount: 6
+  },
+  { 
+    id: 'inst-harvard', 
+    name: 'Harvard University', 
+    regNo: 'US-HARV-1004', 
+    email: 'credentials@harvard.edu', 
+    status: 'approved', 
+    createdAt: '2026-06-20T08:00:00Z',
+    logoUrl: '/logo.jpg',
+    primaryColor: '#A51C30',
+    secondaryColor: '#4F46E5',
+    campusCount: 5,
+    departmentCount: 8
+  },
+  { 
+    id: 'inst-caltech', 
+    name: 'California Institute of Technology', 
+    regNo: 'US-CALT-1005', 
+    email: 'credentials@caltech.edu', 
+    status: 'approved', 
+    createdAt: '2026-06-20T08:00:00Z',
+    logoUrl: '/logo.jpg',
+    primaryColor: '#FF6600',
+    secondaryColor: '#4F46E5',
+    campusCount: 2,
+    departmentCount: 3
+  },
+  { 
+    id: 'inst-oxford', 
+    name: 'University of Oxford', 
+    regNo: 'UK-OXFD-1006', 
+    email: 'credentials@ox.ac.uk', 
+    status: 'approved', 
+    createdAt: '2026-06-20T08:00:00Z',
+    logoUrl: '/logo.jpg',
+    primaryColor: '#002147',
+    secondaryColor: '#4F46E5',
+    campusCount: 6,
+    departmentCount: 12
+  },
+  { 
+    id: 'inst-cambridge', 
+    name: 'University of Cambridge', 
+    regNo: 'UK-CAMB-1007', 
+    email: 'credentials@cam.ac.uk', 
+    status: 'approved', 
+    createdAt: '2026-06-20T08:00:00Z',
+    logoUrl: '/logo.jpg',
+    primaryColor: '#00BFFF',
+    secondaryColor: '#4F46E5',
+    campusCount: 6,
+    departmentCount: 11
   }
 ];
 
@@ -428,7 +494,7 @@ const DEFAULT_USERS: User[] = [
     name: 'Database Administrator Daemon',
     email: 'honeypot.db@aegiscert.gov'
   },
-  // Institution Admin
+  // Institution Admins
   { 
     id: 'usr-mit', 
     username: 'mit', 
@@ -438,6 +504,61 @@ const DEFAULT_USERS: User[] = [
     email: 'registrar@mit.edu', 
     institutionId: 'inst-mit', 
     institutionName: 'Massachusetts Institute of Technology',
+    mpin: hashPassword('123456')
+  },
+  { 
+    id: 'usr-stanford', 
+    username: 'stanford', 
+    password: hashPassword('password123'), 
+    role: 'institution', 
+    name: 'Stanford Registrar Office', 
+    email: 'registrar@stanford.edu', 
+    institutionId: 'inst-stanford', 
+    institutionName: 'Stanford University',
+    mpin: hashPassword('123456')
+  },
+  { 
+    id: 'usr-harvard', 
+    username: 'harvard', 
+    password: hashPassword('password123'), 
+    role: 'institution', 
+    name: 'Harvard Registrar Office', 
+    email: 'registrar@harvard.edu', 
+    institutionId: 'inst-harvard', 
+    institutionName: 'Harvard University',
+    mpin: hashPassword('123456')
+  },
+  { 
+    id: 'usr-caltech', 
+    username: 'caltech', 
+    password: hashPassword('password123'), 
+    role: 'institution', 
+    name: 'Caltech Registrar Office', 
+    email: 'registrar@caltech.edu', 
+    institutionId: 'inst-caltech', 
+    institutionName: 'California Institute of Technology',
+    mpin: hashPassword('123456')
+  },
+  { 
+    id: 'usr-oxford', 
+    username: 'oxford', 
+    password: hashPassword('password123'), 
+    role: 'institution', 
+    name: 'Oxford Registrar Office', 
+    email: 'registrar@ox.ac.uk', 
+    institutionId: 'inst-oxford', 
+    institutionName: 'University of Oxford',
+    mpin: hashPassword('123456')
+  },
+  { 
+    id: 'usr-cambridge', 
+    username: 'cambridge', 
+    password: hashPassword('password123'), 
+    role: 'institution', 
+    name: 'Cambridge Registrar Office', 
+    email: 'registrar@cam.ac.uk', 
+    institutionId: 'inst-cambridge', 
+    institutionName: 'University of Cambridge',
     mpin: hashPassword('123456')
   },
   // Student Alex Johnson (Pre-populated face and fingerprint biometrics)
@@ -776,39 +897,287 @@ function calculateDatabaseDigest(): string {
   return 'sha256-merkle-' + Math.abs(hashVal).toString(16).padEnd(32, '0');
 }
 
-// Helper wrapper
-const getStored = <T>(key: string, defaultValue: T): T => {
-  if (typeof window === 'undefined') return defaultValue;
-  const encStr = localStorage.getItem(`csv_enc_${key}`);
-  if (!encStr) {
-    const plainStr = JSON.stringify(defaultValue);
-    localStorage.setItem(`csv_enc_${key}`, encryptData(plainStr));
-    return defaultValue;
+// Global memory cache representing the active database tables state
+const dbCache: Record<string, any> = {
+  users: DEFAULT_USERS,
+  institutions: DEFAULT_INSTITUTIONS,
+  certificates: DEFAULT_CERTIFICATES,
+  auditLogs: [],
+  socEvents: DEFAULT_SOC_EVENTS,
+  loginHistory: DEFAULT_LOGIN_HISTORY,
+  activeSessions: DEFAULT_ACTIVE_SESSIONS,
+  settings: DEFAULT_SETTINGS,
+  campuses: DEFAULT_CAMPUSES,
+  departments: DEFAULT_DEPARTMENTS,
+  apiKeys: DEFAULT_API_KEYS,
+  apiLogs: DEFAULT_API_LOGS,
+  ocrReports: DEFAULT_OCR_REPORTS,
+  backupSnapshots: DEFAULT_BACKUP_SNAPSHOTS,
+  recoveryLogs: DEFAULT_RECOVERY_LOGS,
+  deviceRegistrations: DEFAULT_DEVICE_REGISTRATIONS,
+  notifications: DEFAULT_NOTIFICATIONS,
+  helpArticles: DEFAULT_HELP_ARTICLES,
+  faqs: DEFAULT_FAQS,
+  supportTickets: DEFAULT_SUPPORT_TICKETS,
+  feedback: DEFAULT_FEEDBACK,
+  troubleshootingGuides: DEFAULT_TROUBLESHOOTING_GUIDES,
+  recentSearches: DEFAULT_RECENT_SEARCHES,
+  blockchainLedger: [] // Loaded dynamically from SQLite database
+};
+
+const keyToTableMap: Record<string, string> = {
+  users: 'users',
+  institutions: 'institutions',
+  certificates: 'certificates',
+  auditLogs: 'audit_logs',
+  socEvents: 'soc_events',
+  loginHistory: 'login_history',
+  activeSessions: 'active_sessions',
+  settings: 'settings',
+  campuses: 'campuses',
+  departments: 'departments',
+  apiKeys: 'api_keys',
+  apiLogs: 'api_logs',
+  ocrReports: 'ocr_reports',
+  backupSnapshots: 'backup_snapshots',
+  recoveryLogs: 'recovery_logs',
+  deviceRegistrations: 'device_registrations',
+  notifications: 'notifications',
+  helpArticles: 'help_articles',
+  faqs: 'faqs',
+  supportTickets: 'support_tickets',
+  feedback: 'feedback',
+  troubleshootingGuides: 'troubleshooting_guides',
+  recentSearches: 'recent_searches',
+  blockchainLedger: 'blockchain_ledger'
+};
+
+function loadFromLocalStorageFallback() {
+  Object.keys(dbCache).forEach(key => {
+    const stored = localStorage.getItem(`csv_enc_${key}`);
+    if (stored) {
+      try {
+        const plain = decryptData(stored);
+        if (plain) {
+          dbCache[key] = JSON.parse(plain);
+        }
+      } catch (e) {}
+    }
+  });
+}
+
+// Initialize database cache by loading from Supabase Cloud PostgreSQL or Express SQLite
+export async function initializeDbConnection(): Promise<void> {
+  const apiUrl = import.meta.env.VITE_API_URL || '';
+  if (apiUrl) {
+    try {
+      const response = await fetch(`${apiUrl}/api/initialize`);
+      if (response.ok) {
+        const result = await response.json();
+        if (result.success) {
+          Object.keys(keyToTableMap).forEach(key => {
+            if (result[key] !== undefined) {
+              dbCache[key] = result[key];
+            }
+          });
+          console.log('Successfully synchronized memory cache with Express SQLite database.');
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn('Express SQLite connection failed, trying Supabase or fallback:', err);
+    }
   }
-  const plainStr = decryptData(encStr);
-  return plainStr ? JSON.parse(plainStr) : defaultValue;
+
+  if (!supabase) {
+    loadFromLocalStorageFallback();
+    return;
+  }
+  try {
+    const keys = Object.keys(keyToTableMap);
+    const promises = keys.map(key => supabase!.from(keyToTableMap[key]).select('*'));
+    const results = await Promise.all(promises);
+
+    results.forEach((res, index) => {
+      const key = keys[index];
+      if (res.error) {
+        console.warn(`Failed to fetch Supabase table ${keyToTableMap[key]}:`, res.error);
+        return;
+      }
+      if (res.data) {
+        let parsedData = res.data;
+        if (key === 'settings') {
+          const settingsObj: Record<string, any> = {};
+          res.data.forEach((s: any) => {
+            if (s.value === 'true') settingsObj[s.key] = true;
+            else if (s.value === 'false') settingsObj[s.key] = false;
+            else settingsObj[s.key] = s.value;
+          });
+          dbCache['settings'] = { ...DEFAULT_SETTINGS, ...settingsObj };
+        } else {
+          parsedData = res.data.map((row: any) => {
+            const parsedRow = { ...row };
+            if (key === 'certificates' && typeof row.statusHistory === 'string') {
+              try { parsedRow.statusHistory = JSON.parse(row.statusHistory); } catch (e) {}
+            }
+            if (key === 'ocrReports' && typeof row.detailedAnalyses === 'string') {
+              try { parsedRow.detailedAnalyses = JSON.parse(row.detailedAnalyses); } catch (e) {}
+            }
+            if (key === 'helpArticles') {
+              if (typeof row.keywords === 'string') {
+                try { parsedRow.keywords = JSON.parse(row.keywords); } catch (e) {}
+              }
+              if (typeof row.relatedRoutes === 'string') {
+                try { parsedRow.relatedRoutes = JSON.parse(row.relatedRoutes); } catch (e) {}
+              }
+            }
+            if (key === 'supportTickets' && typeof row.replies === 'string') {
+              try { parsedRow.replies = JSON.parse(row.replies); } catch (e) {}
+            }
+            if (key === 'blockchainLedger' && typeof row.transactions === 'string') {
+              try { parsedRow.transactions = JSON.parse(row.transactions); } catch (e) {}
+            }
+            return parsedRow;
+          });
+          dbCache[key] = parsedData;
+        }
+      }
+    });
+    console.log('Successfully synchronized memory cache with Supabase Cloud PostgreSQL.');
+  } catch (err) {
+    console.warn('Supabase connection failed, falling back to local storage cache:', err);
+    loadFromLocalStorageFallback();
+  }
+}
+
+// Helper wrappers
+const getStored = <T>(key: string, defaultValue: T): T => {
+  if (dbCache[key] !== undefined) {
+    return dbCache[key] as T;
+  }
+  return defaultValue;
 };
 
 const setStored = <T>(key: string, data: T): void => {
-  if (typeof window === 'undefined') return;
-  const plainStr = JSON.stringify(data);
-  localStorage.setItem(`csv_enc_${key}`, encryptData(plainStr));
+  dbCache[key] = data;
 
-  // Auto-recalculate database integrity hash and save it in settings to prevent mismatch on standard writes
+  try {
+    localStorage.setItem(`csv_enc_${key}`, encryptData(JSON.stringify(data)));
+  } catch (e) {}
+
   if (key !== 'settings') {
     try {
       const settings = getStored('settings', DEFAULT_SETTINGS);
       settings.dbIntegrityHash = calculateDatabaseDigest();
+      dbCache['settings'] = settings;
       localStorage.setItem('csv_enc_settings', encryptData(JSON.stringify(settings)));
     } catch (e) {}
+  }
+
+  // Sync to Express SQLite
+  const apiUrl = import.meta.env.VITE_API_URL || '';
+  if (apiUrl) {
+    try {
+      const tableName = keyToTableMap[key];
+      if (tableName) {
+        fetch(`${apiUrl}/api/sync`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ table: key, data })
+        }).then(res => {
+          if (!res.ok) {
+            console.warn(`Express SQLite sync error on table ${key}`);
+          }
+        }).catch(err => {
+          console.error(`Express SQLite sync exception on table ${key}:`, err);
+        });
+      }
+    } catch (e) {}
+  }
+
+  // Sync to Supabase
+  if (supabase) {
+    const tableName = keyToTableMap[key];
+    if (tableName) {
+      let payload: any = data;
+      if (key === 'settings') {
+        const settingsData = data as Record<string, any>;
+        payload = Object.keys(settingsData).map(k => ({
+          key: k,
+          value: settingsData[k].toString()
+        }));
+      } else if (Array.isArray(data)) {
+        payload = data.map((item: any) => {
+          const mappedItem = { ...item };
+          if (key === 'certificates' && item.statusHistory) {
+            mappedItem.statusHistory = JSON.stringify(item.statusHistory);
+          }
+          if (key === 'ocrReports' && item.detailedAnalyses) {
+            mappedItem.detailedAnalyses = JSON.stringify(item.detailedAnalyses);
+          }
+          if (key === 'helpArticles') {
+            if (item.keywords) mappedItem.keywords = JSON.stringify(item.keywords);
+            if (item.relatedRoutes) mappedItem.relatedRoutes = JSON.stringify(item.relatedRoutes);
+          }
+          if (key === 'supportTickets' && item.replies) {
+            mappedItem.replies = JSON.stringify(item.replies);
+          }
+          if (key === 'blockchainLedger' && item.transactions) {
+            mappedItem.transactions = JSON.stringify(item.transactions);
+          }
+          if (key === 'notifications' && item.read !== undefined) {
+            mappedItem.read = item.read ? 1 : 0;
+          }
+          return mappedItem;
+        });
+      }
+
+      try {
+        supabase.from(tableName).upsert(payload).then(res => {
+          if (res.error) {
+            console.warn(`Supabase upsert error on table ${tableName}:`, res.error);
+          }
+        });
+      } catch (err: any) {
+        console.error(`Supabase sync exception on table ${tableName}:`, err);
+      }
+    }
   }
 };
 
 export const db = {
-  getUsers: (): User[] => getStored('users', DEFAULT_USERS),
+  getUsers: (): User[] => {
+    const list = getStored('users', DEFAULT_USERS);
+    let modified = false;
+    const newList = [...list];
+    DEFAULT_USERS.forEach(defUser => {
+      if (!newList.some(u => u.username === defUser.username)) {
+        newList.push(defUser);
+        modified = true;
+      }
+    });
+    if (modified) {
+      setStored('users', newList);
+    }
+    return newList;
+  },
   setUsers: (users: User[]) => setStored('users', users),
   
-  getInstitutions: (): Institution[] => getStored('institutions', DEFAULT_INSTITUTIONS),
+  getInstitutions: (): Institution[] => {
+    const list = getStored('institutions', DEFAULT_INSTITUTIONS);
+    let modified = false;
+    const newList = [...list];
+    DEFAULT_INSTITUTIONS.forEach(defInst => {
+      if (!newList.some(i => i.id === defInst.id)) {
+        newList.push(defInst);
+        modified = true;
+      }
+    });
+    if (modified) {
+      setStored('institutions', newList);
+    }
+    return newList;
+  },
   setInstitutions: (insts: Institution[]) => setStored('institutions', insts),
   
   getCertificates: (): Certificate[] => getStored('certificates', DEFAULT_CERTIFICATES),
@@ -1136,5 +1505,8 @@ export const db = {
   setTroubleshootingGuides: (guides: TroubleshootingGuide[]) => setStored('troubleshootingGuides', guides),
 
   getRecentSearches: (): RecentSearch[] => getStored('recentSearches', DEFAULT_RECENT_SEARCHES),
-  setRecentSearches: (searches: RecentSearch[]) => setStored('recentSearches', searches)
+  setRecentSearches: (searches: RecentSearch[]) => setStored('recentSearches', searches),
+
+  getBlockchainLedger: (): any[] => getStored('blockchainLedger', []),
+  setBlockchainLedger: (ledger: any[]) => setStored('blockchainLedger', ledger)
 };
