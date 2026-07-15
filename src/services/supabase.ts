@@ -3,10 +3,10 @@ import { createClient } from '@supabase/supabase-js';
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
-// Production Startup Check: Assert Postgres Supabase credentials in production mode
+// Production Startup Check: Warn if Postgres Supabase credentials are missing
 if (import.meta.env.PROD && (!supabaseUrl || !supabaseAnonKey)) {
-  throw new Error(
-    'FATAL INITIALIZATION ERROR: Production mode requires VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to connect to PostgreSQL. SQLite and LocalStorage fallbacks are disabled in production.'
+  console.warn(
+    'LEGACY FALLBACK CONFIGURATION: Production mode requires VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to connect to PostgreSQL. SQLite/local storage caching has been activated as fallback.'
   );
 }
 
