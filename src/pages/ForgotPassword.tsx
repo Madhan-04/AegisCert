@@ -27,22 +27,22 @@ export default function ForgotPassword({ navigate }: ForgotPasswordProps) {
 
     if (user) {
       setMatchedUser(user);
-      // Trigger OTP dispatch
       const target = user.email || user.contact || '';
-      db.sendOTP(target);
-      setStep(2);
-      db.addAuditLog(user.id, user.name, user.role, 'PASSWORD_RECOVERY_OTP_REQUEST', `Requested OTP for password restoration for ${target}`, 'success');
+      db.sendOTP(target, user.id, user.username).then(() => {
+        setStep(2);
+        db.addAuditLog(user.id, user.name, user.role, 'PASSWORD_RECOVERY_OTP_REQUEST', `Requested OTP for password restoration for ${target}`, 'success');
+      });
     } else {
       setError('No registered credential holder matches this email or phone number.');
     }
   };
 
-  const handleVerifyOTP = (e: React.FormEvent) => {
+  const handleVerifyOTP = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
 
     const target = matchedUser.email || matchedUser.contact || '';
-    const success = db.verifyOTP(target, otpInput);
+    const success = await db.verifyOTP(target, otpInput, matchedUser.id);
 
     if (success) {
       setStep(3);

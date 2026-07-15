@@ -88,18 +88,19 @@ export default function Settings() {
 
     // Trigger OTP SMS/Email Dispatch
     const target = currentUser.email || currentUser.contact || '';
-    db.sendOTP(target);
-    setOtpSent(true);
+    db.sendOTP(target, currentUser.id, currentUser.username).then(() => {
+      setOtpSent(true);
+    });
   };
 
-  const handleVerifyPasswordChange = (e: React.FormEvent) => {
+  const handleVerifyPasswordChange = async (e: React.FormEvent) => {
     e.preventDefault();
     setOtpError('');
 
     if (!currentUser) return;
 
     const target = currentUser.email || currentUser.contact || '';
-    const verifySuccess = db.verifyOTP(target, otpInput);
+    const verifySuccess = await db.verifyOTP(target, otpInput, currentUser.id);
 
     if (verifySuccess) {
       // Save password change in encrypted DB

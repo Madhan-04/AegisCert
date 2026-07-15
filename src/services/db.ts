@@ -1,5 +1,4 @@
 // Cryptographically Secured Local Storage Database Service with OTP Verification
-import { supabase } from './supabase';
 
 export interface User {
   id: string;
@@ -628,18 +627,7 @@ const keyToTableMap: Record<string, string> = {
 };
 
 async function loadFromLocalStorageFallback() {
-  const keys = Object.keys(dbCache);
-  for (const key of keys) {
-    const stored = localStorage.getItem(`csv_enc_${key}`);
-    if (stored) {
-      try {
-        const plain = await decryptData(stored);
-        if (plain) {
-          dbCache[key] = JSON.parse(plain);
-        }
-      } catch (e) {}
-    }
-  }
+  console.warn('Offline local storage fallback mode is deactivated in production. DB must run against the REST API server.');
 }
 
 export async function initializeDbConnection(): Promise<void> {
@@ -685,18 +673,12 @@ const setStored = async <T>(key: string, data: T): Promise<void> => {
   const oldData = dbCache[key] || [];
   dbCache[key] = data;
 
-  try {
-    const enc = await encryptData(JSON.stringify(data));
-    localStorage.setItem(`csv_enc_${key}`, enc);
-  } catch (e) {}
-
+  // Local storage writes for business data cache are disabled. SQLite is the single source of truth.
   if (key !== 'settings') {
     try {
       const settings = getStored('settings', DEFAULT_SETTINGS);
       settings.dbIntegrityHash = calculateDatabaseDigest();
       dbCache['settings'] = settings;
-      const encSettings = await encryptData(JSON.stringify(settings));
-      localStorage.setItem('csv_enc_settings', encSettings);
     } catch (e) {}
   }
 
@@ -760,55 +742,6 @@ const setStored = async <T>(key: string, data: T): Promise<void> => {
             }
           }).catch(err => console.error(err));
         }
-      }
-    }
-  }
-
-  // Sync to Supabase
-  if (supabase) {
-    const tableName = keyToTableMap[key];
-    if (tableName) {
-      let payload: any = data;
-      if (key === 'settings') {
-        const settingsData = data as Record<string, any>;
-        payload = Object.keys(settingsData).map(k => ({
-          key: k,
-          value: settingsData[k].toString()
-        }));
-      } else if (Array.isArray(data)) {
-        payload = data.map((item: any) => {
-          const mappedItem = { ...item };
-          if (key === 'certificates' && item.statusHistory) {
-            mappedItem.statusHistory = JSON.stringify(item.statusHistory);
-          }
-          if (key === 'ocrReports' && item.detailedAnalyses) {
-            mappedItem.detailedAnalyses = JSON.stringify(item.detailedAnalyses);
-          }
-          if (key === 'helpArticles') {
-            if (item.keywords) mappedItem.keywords = JSON.stringify(item.keywords);
-            if (item.relatedRoutes) mappedItem.relatedRoutes = JSON.stringify(item.relatedRoutes);
-          }
-          if (key === 'supportTickets' && item.replies) {
-            mappedItem.replies = JSON.stringify(item.replies);
-          }
-          if (key === 'blockchainLedger' && item.transactions) {
-            mappedItem.transactions = JSON.stringify(item.transactions);
-          }
-          if (key === 'notifications' && item.read !== undefined) {
-            mappedItem.read = item.read ? 1 : 0;
-          }
-          return mappedItem;
-        });
-      }
-
-      try {
-        supabase.from(tableName).upsert(payload).then(res => {
-          if (res.error) {
-            console.warn(`Supabase upsert error on table ${tableName}:`, res.error);
-          }
-        });
-      } catch (err: any) {
-        console.error(`Supabase sync exception on table ${tableName}:`, err);
       }
     }
   }
@@ -934,44 +867,54 @@ export const db = {
   },
 
   getCurrentUser: (): User | null => {
-    const userStr = sessionStorage.getItem('csv_current_user');
+    const userStr = sessionStorage.getItem('csv_user_session');
     return userStr ? JSON.parse(userStr) : null;
   },
 
   setCurrentUser: (user: User | null) => {
     if (user) {
-      sessionStorage.setItem('csv_current_user', JSON.stringify(user));
+      sessionStorage.setItem('csv_user_session', JSON.stringify(user));
     } else {
-      sessionStorage.removeItem('csv_current_user');
+      sessionStorage.removeItem('csv_user_session');
       sessionStorage.removeItem('csv_jwt_token');
+      localStorage.removeItem('csv_refresh_token');
     }
   },
 
   // OTP Subsystem - Server-safe simulator logs code only to console
-  sendOTP: (contactOrEmail: string): string => {
-    const array = new Uint32Array(1);
-    crypto.getRandomValues(array);
-    const code = (100000 + (array[0] % 900000)).toString();
-    sessionStorage.setItem(`otp_${contactOrEmail}`, code);
-    
-    // Stop writing OTP code to audit logs - Phase 2.7
-    db.addAuditLog('otp-service', 'OTP Daemon', 'admin', 'OTP_SENT', `Generated secure OTP for authentication validation challenge`, 'success');
-    db.addSocEvent('medium', 'OTP_REQUEST', `One-Time Password requested by validation target`, '127.0.0.1');
-
-    console.log(`[SERVER SMS SIMULATOR] OTP code for ${contactOrEmail} is: ${code}`);
-
-    // Trigger local CustomEvent without code (it will be verified in mock, but on-screen displays won't see it)
-    const event = new CustomEvent('OTP_DISPATCHED', { detail: { contact: contactOrEmail } });
-    window.dispatchEvent(event);
-
-    return code;
+  sendOTP: async (contactOrEmail: string, userId?: string, username?: string): Promise<string> => {
+    const apiUrl = import.meta.env.VITE_API_URL || '';
+    if (apiUrl) {
+      try {
+        await fetch(`${apiUrl}/api/auth/send-otp`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: userId || 'usr-student', username: username || 'student' })
+        });
+      } catch (err) {
+        console.error('Failed to dispatch OTP from backend:', err);
+      }
+    }
+    db.addAuditLog(userId || 'otp-service', username || 'OTP Daemon', 'admin', 'OTP_SENT', `Generated secure OTP for authentication validation challenge`, 'success');
+    return '123456';
   },
 
-  verifyOTP: (contactOrEmail: string, otp: string): boolean => {
-    const stored = sessionStorage.getItem(`otp_${contactOrEmail}`);
-    if (stored && stored === otp) {
-      sessionStorage.removeItem(`otp_${contactOrEmail}`);
-      return true;
+  verifyOTP: async (contactOrEmail: string, otp: string, userId?: string): Promise<boolean> => {
+    const apiUrl = import.meta.env.VITE_API_URL || '';
+    if (apiUrl) {
+      try {
+        const response = await fetch(`${apiUrl}/api/auth/verify-otp`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: userId || 'usr-student', code: otp })
+        });
+        if (response.ok) {
+          const res = await response.json();
+          return !!res.success;
+        }
+      } catch (err) {
+        console.error('Failed to verify OTP on backend:', err);
+      }
     }
     return false;
   },
@@ -1121,15 +1064,16 @@ export const db = {
       if (response.ok) {
         const result = await response.json();
         if (result.success) {
-          sessionStorage.setItem('csv_jwt_token', result.token);
-          db.setCurrentUser(result.user);
+          sessionStorage.setItem('csv_jwt_token', result.data.accessToken);
+          localStorage.setItem('csv_refresh_token', result.data.refreshToken);
+          db.setCurrentUser(result.data.user);
           // Re-initialize cache with JWT
           await initializeDbConnection();
-          return { success: true, mustResetPassword: result.mustResetPassword };
+          return { success: true, mustResetPassword: result.data.mustResetPassword };
         }
       }
       const errRes = await response.json();
-      return { success: false, error: errRes.error || 'Authentication failed.' };
+      return { success: false, error: errRes.message || errRes.error || 'Authentication failed.' };
     } catch (err: any) {
       return { success: false, error: err.message };
     }
