@@ -129,20 +129,30 @@ export const CONTRACT_ABI = [
 
 export const CONTRACT_BYTECODE = "0x608060405234801561001057600080fd5b50610f76806100206000396000f3fe608060405234801561001057600080fd5b50600436106100415760003560e01c806334fba3d2146100465780638b693e50146100f0578063a8247df614610140575b600080fd5b600035...000000000000000000000000";
 
-// Simple custom SHA-256 builder
-export function sha256Sync(str: string): string {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = (hash << 5) - hash + char;
-    hash = hash & hash;
+// Real SHA-256 implementation via Web Crypto API
+export async function sha256(str: string): Promise<string> {
+  const cryptoObj = typeof window !== 'undefined' && window.crypto ? window.crypto : (typeof globalThis !== 'undefined' && globalThis.crypto ? globalThis.crypto : null);
+
+  if (!cryptoObj || !cryptoObj.subtle) {
+    // Fallback simple hash for non-browser environments
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = (hash << 5) - hash + char;
+      hash = hash & hash;
+    }
+    const hex = Math.abs(hash).toString(16).padStart(8, '0');
+    let result = '';
+    for (let i = 0; i < 8; i++) {
+      result += hex + ((hash * (i + 1)) & 0xffffff).toString(16).padStart(8, '0');
+    }
+    return result.slice(0, 64);
   }
-  const hex = Math.abs(hash).toString(16).padStart(8, '0');
-  let result = '';
-  for (let i = 0; i < 8; i++) {
-    result += hex + ((hash * (i + 1)) & 0xffffff).toString(16).padStart(8, '0');
-  }
-  return result.slice(0, 64);
+
+  const msgUint8 = new TextEncoder().encode(str);
+  const hashBuffer = await cryptoObj.subtle.digest('SHA-256', msgUint8);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 // Initial Genesis Block
@@ -162,7 +172,7 @@ const DEFAULT_LEDGER: Block[] = [
 ];
 
 export const blockchain = {
-  sha256Sync,
+  sha256,
   
   getLedger: (): Block[] => {
     const list = db.getBlockchainLedger();
@@ -205,7 +215,9 @@ export const blockchain = {
     }
     const inputData = `${methodSignature}${encryptABI(txData.certId, txData.certHash)}`;
 
-    const txHash = '0x' + sha256Sync(blockNumber + timestamp + parentHash + txData.certId + Math.random().toString());
+    const secureArray = new Uint32Array(1);
+    crypto.getRandomValues(secureArray);
+    const txHash = '0x' + await sha256(blockNumber + timestamp + parentHash + txData.certId + secureArray[0].toString());
 
     const transaction: Transaction = {
       hash: txHash,
@@ -226,43 +238,48 @@ export const blockchain = {
     };
 
     let nonceVal = 0;
-    let blockHash = '';
-    const difficultyPrefix = '00'; // Mimic Proof of Work (reduced difficulty for 144Hz real-time responsiveness)
+    const difficultyPrefix = '00'; 
     const baseContent = blockNumber + timestamp + parentHash + JSON.stringify(transaction);
 
-    return new Promise((resolve) => {
-      const mineInterval = setInterval(() => {
-        for (let i = 0; i < 75; i++) {
-          const testHash = sha256Sync(baseContent + nonceVal);
-          if (testHash.startsWith(difficultyPrefix)) {
-            clearInterval(mineInterval);
-            
-            const newBlock: Block = {
-              number: blockNumber,
-              hash: '0x' + testHash,
-              parentHash,
-              timestamp,
-              transactions: [transaction],
-              nonce: '0x' + nonceVal.toString(16),
-              difficulty: '14,839,281,992 Ghash',
-              gasUsed: transaction.gasUsed,
-              gasLimit: 30000000,
-              miner: '0x2D1a980F1a6b7e8d9c0a9B8C7E8f9A0B1c2d3E4f'
-            };
+    let done = false;
+    let newBlock: Block | null = null;
 
-            const currentLedger = blockchain.getLedger();
-            currentLedger.push(newBlock);
-            blockchain.setLedger(currentLedger);
-            
-            resolve(newBlock);
-            return;
-          }
-          nonceVal++;
+    while (!done) {
+      for (let i = 0; i < 75; i++) {
+        const testHash = await sha256(baseContent + nonceVal);
+        if (testHash.startsWith(difficultyPrefix)) {
+          done = true;
+          
+          newBlock = {
+            number: blockNumber,
+            hash: '0x' + testHash,
+            parentHash,
+            timestamp,
+            transactions: [transaction],
+            nonce: '0x' + nonceVal.toString(16),
+            difficulty: '14,839,281,992 Ghash',
+            gasUsed: transaction.gasUsed,
+            gasLimit: 30000000,
+            miner: '0x2D1a980F1a6b7e8d9c0a9B8C7E8f9A0B1c2d3E4f'
+          };
+
+          const currentLedger = blockchain.getLedger();
+          currentLedger.push(newBlock);
+          blockchain.setLedger(currentLedger);
+          break;
         }
-        blockHash = '0x' + sha256Sync(baseContent + nonceVal);
+        nonceVal++;
+      }
+
+      if (!done) {
+        const blockHash = '0x' + await sha256(baseContent + nonceVal);
         onProgress(nonceVal, blockHash);
-      }, 30);
-    });
+        // yield to browser thread
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      }
+    }
+
+    return newBlock!;
   },
 
   // Verification API using smart contract simulations

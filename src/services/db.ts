@@ -26,6 +26,7 @@ export interface User {
   failedLoginAttempts?: number;
   lockedUntil?: string;
   mpin?: string;
+  mustResetPassword?: boolean;
 }
 
 export interface Institution {
@@ -299,7 +300,7 @@ export interface SystemSettings {
   biometricSimulationMode?: boolean;
 }
 
-// AES-256-like Client-Side Hex Obfuscation / Encryption Layer
+// AES-256 Cryptographic Obfuscation Key
 const CRYPTO_KEY = 'AEGISCERT_ENTERPRISE_SHIELD_SECRET_KEY';
 
 function getActiveKey(): string {
@@ -312,31 +313,81 @@ function getActiveKey(): string {
   return key;
 }
 
-export function encryptData(text: string): string {
-  const activeKey = getActiveKey();
-  
-  // Simulate AES-256-GCM format by generating a mock IV and auth tag
-  const iv = Math.floor(10000000 + Math.random() * 90000000).toString(16).toUpperCase();
-  const tag = Math.floor(100000000 + Math.random() * 900000000).toString(16).toUpperCase();
-
-  // Encrypt ciphertext using XOR with the active key and IV combined
-  let cipher = '';
-  const combinedKey = activeKey + iv + tag;
-  for (let i = 0; i < text.length; i++) {
-    const charCode = text.charCodeAt(i) ^ combinedKey.charCodeAt(i % combinedKey.length);
-    cipher += String.fromCharCode(charCode);
+// PBKDF2 Key Derivation Helper
+async function getCryptoKey(passphrase: string, salt: Uint8Array): Promise<CryptoKey | null> {
+  if (typeof window === 'undefined' || !window.crypto || !window.crypto.subtle) return null;
+  try {
+    const enc = new TextEncoder();
+    const keyMaterial = await window.crypto.subtle.importKey(
+      'raw',
+      enc.encode(passphrase),
+      { name: 'PBKDF2' },
+      false,
+      ['deriveBits', 'deriveKey']
+    );
+    return await window.crypto.subtle.deriveKey(
+      {
+        name: 'PBKDF2',
+        salt: salt as any,
+        iterations: 100000,
+        hash: 'SHA-256'
+      },
+      keyMaterial,
+      { name: 'AES-GCM', length: 256 },
+      true,
+      ['encrypt', 'decrypt']
+    );
+  } catch (e) {
+    return null;
   }
-  const encryptedBase64 = btoa(unescape(encodeURIComponent(cipher)));
-  return `AES-GCM-v4$${iv}$${tag}$${encryptedBase64}`;
 }
 
-export function decryptData(cipherText: string): string {
-  if (!cipherText) return '';
-  const activeKey = getActiveKey();
+/**
+ * Real Web Crypto AES-GCM Encrypt Function
+ */
+export async function encryptData(text: string): Promise<string> {
+  if (typeof window === 'undefined' || !window.crypto || !window.crypto.subtle) {
+    console.warn('Insecure context detected: falling back to base64 obfuscation.');
+    return `BASE64$${btoa(encodeURIComponent(text))}`;
+  }
 
   try {
-    // If it's the old XOR format, support legacy fallback
-    if (!cipherText.startsWith('AES-GCM-v4$')) {
+    const activeKey = getActiveKey();
+    const salt = window.crypto.getRandomValues(new Uint8Array(16));
+    const iv = window.crypto.getRandomValues(new Uint8Array(12));
+    const key = await getCryptoKey(activeKey, salt);
+
+    if (!key) throw new Error('Key derivation failed');
+
+    const enc = new TextEncoder();
+    const encrypted = await window.crypto.subtle.encrypt(
+      {
+        name: 'AES-GCM',
+        iv: iv
+      },
+      key,
+      enc.encode(text)
+    );
+
+    const saltHex = Array.from(salt).map(b => b.toString(16).padStart(2, '0')).join('');
+    const ivHex = Array.from(iv).map(b => b.toString(16).padStart(2, '0')).join('');
+    const ciphertextHex = Array.from(new Uint8Array(encrypted)).map(b => b.toString(16).padStart(2, '0')).join('');
+
+    return `AES-GCM-v5$${saltHex}$${ivHex}$${ciphertextHex}`;
+  } catch (e) {
+    return `BASE64$${btoa(encodeURIComponent(text))}`;
+  }
+}
+
+/**
+ * Real Web Crypto AES-GCM Decrypt Function
+ */
+export async function decryptData(cipherText: string): Promise<string> {
+  if (!cipherText) return '';
+
+  // Legacy decryption support
+  if (!cipherText.startsWith('AES-GCM-v5$') && !cipherText.startsWith('BASE64$')) {
+    try {
       let result = '';
       const legacyKey = 'AEGISCERT_ENTERPRISE_SHIELD_SECRET_KEY';
       const raw = decodeURIComponent(escape(atob(cipherText)));
@@ -345,322 +396,72 @@ export function decryptData(cipherText: string): string {
         result += String.fromCharCode(charCode);
       }
       return result;
+    } catch (e) {
+      return '';
     }
+  }
 
+  if (cipherText.startsWith('BASE64$')) {
+    try {
+      return decodeURIComponent(atob(cipherText.split('$')[1]));
+    } catch (e) {
+      return '';
+    }
+  }
+
+  if (typeof window === 'undefined' || !window.crypto || !window.crypto.subtle) {
+    return '';
+  }
+
+  try {
+    const activeKey = getActiveKey();
     const parts = cipherText.split('$');
-    const iv = parts[1];
-    const tag = parts[2];
-    const base64Cipher = parts[3];
+    const saltHex = parts[1];
+    const ivHex = parts[2];
+    const ciphertextHex = parts[3];
 
-    const raw = decodeURIComponent(escape(atob(base64Cipher)));
-    let result = '';
-    const combinedKey = activeKey + iv + tag;
-    for (let i = 0; i < raw.length; i++) {
-      const charCode = raw.charCodeAt(i) ^ combinedKey.charCodeAt(i % combinedKey.length);
-      result += String.fromCharCode(charCode);
-    }
-    return result;
+    const salt = new Uint8Array(saltHex.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
+    const iv = new Uint8Array(ivHex.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
+    const ciphertext = new Uint8Array(ciphertextHex.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
+
+    const key = await getCryptoKey(activeKey, salt);
+    if (!key) throw new Error('Key derivation failed');
+
+    const decrypted = await window.crypto.subtle.decrypt(
+      {
+        name: 'AES-GCM',
+        iv: iv
+      },
+      key,
+      ciphertext
+    );
+
+    return new TextDecoder().decode(decrypted);
   } catch (e) {
     return '';
   }
 }
 
-// Simulated bcrypt-like password hashing with cost factor 12 (4096 rounds)
+// Client-side display helper only. No security utility.
 export function hashPassword(pwd: string): string {
-  let hash = pwd;
-  const salt = 'aegiscert_bcrypt_salt_v4_'; // stable salt simulation
-  for (let round = 0; round < 4096; round++) {
-    let hashVal = 0;
-    const combined = hash + salt + round;
-    for (let i = 0; i < combined.length; i++) {
-      hashVal = (hashVal << 5) - hashVal + combined.charCodeAt(i);
-      hashVal = hashVal & hashVal;
-    }
-    hash = Math.abs(hashVal).toString(16).padStart(8, '0') + hash.slice(0, 8);
-  }
-  return 'bcrypt$12$' + hash.slice(0, 32);
+  // Return input mock format for client presentation
+  return 'bcrypt$12$display_helper_mock_' + pwd.slice(0, 8);
 }
 
 // Default Databases
 const DEFAULT_INSTITUTIONS: Institution[] = [
-  { 
-    id: 'inst-mit', 
-    name: 'Massachusetts Institute of Technology', 
-    regNo: 'US-MIT-1002', 
-    email: 'credentials@mit.edu', 
-    status: 'approved', 
-    createdAt: '2026-06-20T08:00:00Z',
-    logoUrl: '/logo.jpg',
-    primaryColor: '#6C63FF',
-    secondaryColor: '#4F46E5',
-    campusCount: 3,
-    departmentCount: 4
-  },
-  { 
-    id: 'inst-stanford', 
-    name: 'Stanford University', 
-    regNo: 'US-STAN-1003', 
-    email: 'credentials@stanford.edu', 
-    status: 'approved', 
-    createdAt: '2026-06-20T08:00:00Z',
-    logoUrl: '/logo.jpg',
-    primaryColor: '#8C1515',
-    secondaryColor: '#4F46E5',
-    campusCount: 4,
-    departmentCount: 6
-  },
-  { 
-    id: 'inst-harvard', 
-    name: 'Harvard University', 
-    regNo: 'US-HARV-1004', 
-    email: 'credentials@harvard.edu', 
-    status: 'approved', 
-    createdAt: '2026-06-20T08:00:00Z',
-    logoUrl: '/logo.jpg',
-    primaryColor: '#A51C30',
-    secondaryColor: '#4F46E5',
-    campusCount: 5,
-    departmentCount: 8
-  },
-  { 
-    id: 'inst-caltech', 
-    name: 'California Institute of Technology', 
-    regNo: 'US-CALT-1005', 
-    email: 'credentials@caltech.edu', 
-    status: 'approved', 
-    createdAt: '2026-06-20T08:00:00Z',
-    logoUrl: '/logo.jpg',
-    primaryColor: '#FF6600',
-    secondaryColor: '#4F46E5',
-    campusCount: 2,
-    departmentCount: 3
-  },
-  { 
-    id: 'inst-oxford', 
-    name: 'University of Oxford', 
-    regNo: 'UK-OXFD-1006', 
-    email: 'credentials@ox.ac.uk', 
-    status: 'approved', 
-    createdAt: '2026-06-20T08:00:00Z',
-    logoUrl: '/logo.jpg',
-    primaryColor: '#002147',
-    secondaryColor: '#4F46E5',
-    campusCount: 6,
-    departmentCount: 12
-  },
-  { 
-    id: 'inst-cambridge', 
-    name: 'University of Cambridge', 
-    regNo: 'UK-CAMB-1007', 
-    email: 'credentials@cam.ac.uk', 
-    status: 'approved', 
-    createdAt: '2026-06-20T08:00:00Z',
-    logoUrl: '/logo.jpg',
-    primaryColor: '#00BFFF',
-    secondaryColor: '#4F46E5',
-    campusCount: 6,
-    departmentCount: 11
-  }
+  { id: 'inst-mit', name: 'Massachusetts Institute of Technology', regNo: 'US-MIT-1002', email: 'credentials@mit.edu', status: 'approved', createdAt: '2026-06-20T08:00:00Z', logoUrl: '/logo.jpg', primaryColor: '#6C63FF', secondaryColor: '#4F46E5', campusCount: 3, departmentCount: 4 },
+  { id: 'inst-stanford', name: 'Stanford University', regNo: 'US-STAN-1003', email: 'credentials@stanford.edu', status: 'approved', createdAt: '2026-06-20T08:00:00Z', logoUrl: '/logo.jpg', primaryColor: '#8C1515', secondaryColor: '#4F46E5', campusCount: 4, departmentCount: 6 },
+  { id: 'inst-harvard', name: 'Harvard University', regNo: 'US-HARV-1004', email: 'credentials@harvard.edu', status: 'approved', createdAt: '2026-06-20T08:00:00Z', logoUrl: '/logo.jpg', primaryColor: '#A51C30', secondaryColor: '#4F46E5', campusCount: 5, departmentCount: 8 }
 ];
 
 const DEFAULT_USERS: User[] = [
-  // Super Admin: Mr. MADHAN (No biometrics enrolled initially to force first-time enrollment)
-  { 
-    id: 'usr-madhan', 
-    username: 'madhan', 
-    password: hashPassword('password123'), 
-    role: 'admin', 
-    name: 'Mr. MADHAN', 
-    email: 'madhan@aegiscert.gov', 
-    contact: '+1 (555) 019-8822', 
-    faceEnrollId: '',
-    fingerprintStatus: 'pending',
-    mpin: '' 
-  },
-  // Honeytoken Decoy Accounts (Zero Zero Trust Intrusion Traps)
-  {
-    id: 'usr-honeytoken-1',
-    username: 'backup_root',
-    password: hashPassword('locked_root_bypass_trap_9918'),
-    role: 'admin',
-    name: 'Backup System Root Daemon',
-    email: 'honeypot.root@aegiscert.gov'
-  },
-  {
-    id: 'usr-honeytoken-2',
-    username: 'database_root',
-    password: hashPassword('locked_database_bypass_trap_1029'),
-    role: 'admin',
-    name: 'Database Administrator Daemon',
-    email: 'honeypot.db@aegiscert.gov'
-  },
-  // Institution Admins
-  { 
-    id: 'usr-mit', 
-    username: 'mit', 
-    password: hashPassword('password123'), 
-    role: 'institution', 
-    name: 'MIT Registrar Office', 
-    email: 'registrar@mit.edu', 
-    institutionId: 'inst-mit', 
-    institutionName: 'Massachusetts Institute of Technology',
-    mpin: hashPassword('123456')
-  },
-  { 
-    id: 'usr-stanford', 
-    username: 'stanford', 
-    password: hashPassword('password123'), 
-    role: 'institution', 
-    name: 'Stanford Registrar Office', 
-    email: 'registrar@stanford.edu', 
-    institutionId: 'inst-stanford', 
-    institutionName: 'Stanford University',
-    mpin: hashPassword('123456')
-  },
-  { 
-    id: 'usr-harvard', 
-    username: 'harvard', 
-    password: hashPassword('password123'), 
-    role: 'institution', 
-    name: 'Harvard Registrar Office', 
-    email: 'registrar@harvard.edu', 
-    institutionId: 'inst-harvard', 
-    institutionName: 'Harvard University',
-    mpin: hashPassword('123456')
-  },
-  { 
-    id: 'usr-caltech', 
-    username: 'caltech', 
-    password: hashPassword('password123'), 
-    role: 'institution', 
-    name: 'Caltech Registrar Office', 
-    email: 'registrar@caltech.edu', 
-    institutionId: 'inst-caltech', 
-    institutionName: 'California Institute of Technology',
-    mpin: hashPassword('123456')
-  },
-  { 
-    id: 'usr-oxford', 
-    username: 'oxford', 
-    password: hashPassword('password123'), 
-    role: 'institution', 
-    name: 'Oxford Registrar Office', 
-    email: 'registrar@ox.ac.uk', 
-    institutionId: 'inst-oxford', 
-    institutionName: 'University of Oxford',
-    mpin: hashPassword('123456')
-  },
-  { 
-    id: 'usr-cambridge', 
-    username: 'cambridge', 
-    password: hashPassword('password123'), 
-    role: 'institution', 
-    name: 'Cambridge Registrar Office', 
-    email: 'registrar@cam.ac.uk', 
-    institutionId: 'inst-cambridge', 
-    institutionName: 'University of Cambridge',
-    mpin: hashPassword('123456')
-  },
-  // Student Alex Johnson (Pre-populated face and fingerprint biometrics)
-  { 
-    id: 'usr-student', 
-    username: 'student', 
-    password: hashPassword('password123'), 
-    role: 'student', 
-    name: 'Alex Johnson', 
-    email: 'alex.j@student.mit.edu', 
-    institutionId: 'inst-mit', 
-    institutionName: 'Massachusetts Institute of Technology', 
-    rollNo: 'MIT-2024-082', 
-    regNo: 'REG-9923881', 
-    department: 'Computer Science', 
-    batch: '2022-2026', 
-    contact: '+1 (555) 019-2834', 
-    faceEnrollId: 'FACE-SIM-ALEX-9923',
-    fingerprintTemplate: 'MFS100_V54_TEMP_ALEX_0x8B2C4F',
-    fingerprintHash: '4a6b293817fcf1e2a074092cb838a5b2e109d38c1a7a6b2e10d3f82cb8a192bc',
-    fingerprintDeviceId: 'Mantra MFS100 - SN 1920822',
-    fingerprintEnrolledAt: '2026-06-21T10:00:00Z',
-    fingerprintStatus: 'enrolled',
-    enrolledAt: '2026-06-21T10:00:00Z',
-    mpin: hashPassword('123456')
-  },
-  // Verifier
-  { 
-    id: 'usr-verifier', 
-    username: 'verifier', 
-    password: hashPassword('password123'), 
-    role: 'verifier', 
-    name: 'Global HR Verifier', 
-    email: 'hr@google.com',
-    mpin: hashPassword('123456')
-  }
+  { id: 'usr-madhan', username: 'madhan', role: 'admin', name: 'Mr. MADHAN', email: 'madhan@aegiscert.gov', contact: '+1 (555) 019-8822', fingerprintStatus: 'pending' },
+  { id: 'usr-student', username: 'student', role: 'student', name: 'Alex Johnson', email: 'alex.j@student.mit.edu', institutionId: 'inst-mit', institutionName: 'Massachusetts Institute of Technology', rollNo: 'MIT-2024-082', regNo: 'REG-9923881', department: 'Computer Science', batch: '2022-2026', contact: '+1 (555) 019-2834', faceEnrollId: 'FACE-SIM-ALEX-9923', fingerprintTemplate: 'MFS100_V54_TEMP_ALEX_0x8B2C4F', fingerprintHash: '4a6b293817fcf1e2a074092cb838a5b2e109d38c1a7a6b2e10d3f82cb8a192bc', fingerprintDeviceId: 'Mantra MFS100 - SN 1920822', fingerprintEnrolledAt: '2026-06-21T10:00:00Z', fingerprintStatus: 'enrolled', enrolledAt: '2026-06-21T10:00:00Z' }
 ];
 
 const DEFAULT_CERTIFICATES: Certificate[] = [
-  {
-    id: 'CERT-2026-0001',
-    studentName: 'Alex Johnson',
-    rollNo: 'MIT-2024-082',
-    regNo: 'REG-9923881',
-    degree: 'Bachelor of Science',
-    department: 'Computer Science',
-    cgpa: 3.91,
-    institutionId: 'inst-mit',
-    institutionName: 'Massachusetts Institute of Technology',
-    issueDate: '2026-06-21T10:00:00Z',
-    blockchainHash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-    signature: 'SIG_0x4298FC1C149AFBF4C8996FB9...B855',
-    status: 'active',
-    statusHistory: [
-      { status: 'draft', timestamp: '2026-06-20T10:00:00Z', updatedBy: 'MIT Registrar Office' },
-      { status: 'pending', timestamp: '2026-06-20T14:00:00Z', updatedBy: 'MIT Registrar Office' },
-      { status: 'active', timestamp: '2026-06-21T10:00:00Z', updatedBy: 'MIT Registrar Office', reason: 'Official academic approval signed' }
-    ],
-    offlineSignature: 'OFFLINE_SIG_0x4298FC1C149AFBF4C8996FB9...B855',
-    verificationChecksum: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
-  },
-  {
-    id: 'CERT-2026-0002',
-    studentName: 'Sarah Connor',
-    rollNo: 'MIT-2024-110',
-    regNo: 'REG-8823101',
-    degree: 'Master of Science',
-    department: 'Cybernetics',
-    cgpa: 3.85,
-    institutionId: 'inst-mit',
-    institutionName: 'Massachusetts Institute of Technology',
-    issueDate: '2026-06-22T09:30:00Z',
-    blockchainHash: 'f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8e7',
-    signature: 'SIG_0x7A9D8B6C5E3F2A1D...33D8',
-    status: 'suspended',
-    revocationReason: 'Academic verification audit pending',
-    statusHistory: [
-      { status: 'active', timestamp: '2026-06-22T09:30:00Z', updatedBy: 'MIT Registrar Office' },
-      { status: 'suspended', timestamp: '2026-06-23T08:15:00Z', updatedBy: 'MIT Registrar Office', reason: 'Academic verification audit pending' }
-    ],
-    offlineSignature: 'OFFLINE_SIG_0x7A9D8B6C5E3F2A1D...33D8',
-    verificationChecksum: 'f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8e7'
-  },
-  // Decoy Certificate (Intrusion Detection Honeypot)
-  {
-    id: 'CERT-DECOY-777',
-    studentName: 'SYSTEM DECOY TRAP',
-    rollNo: 'MIT-DECOY-TRAP',
-    regNo: 'REG-9999999',
-    degree: 'Bachelor of Cyber Intrusion',
-    department: 'Information Security',
-    cgpa: 0.0,
-    institutionId: 'inst-mit',
-    institutionName: 'AegisCert HoneyNet Operations',
-    issueDate: '2026-06-23T00:00:00Z',
-    blockchainHash: 'decoydecoydecoydecoydecoydecoydecoydecoydecoydecoydecoydecoydecoy777',
-    signature: 'SIG_RSA_4096_DECOY_KEY_TRAP',
-    status: 'active',
-    statusHistory: [],
-    offlineSignature: 'OFFLINE_SIG_DECOY_RSA4096_TRAP',
-    verificationChecksum: 'decoydecoydecoydecoydecoydecoydecoydecoydecoydecoydecoydecoydecoy777'
-  }
+  { id: 'CERT-2026-0001', studentName: 'Alex Johnson', rollNo: 'MIT-2024-082', regNo: 'REG-9923881', degree: 'Bachelor of Science', department: 'Computer Science', cgpa: 3.91, institutionId: 'inst-mit', institutionName: 'Massachusetts Institute of Technology', issueDate: '2026-06-21T10:00:00Z', blockchainHash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', signature: 'SIG_0x4298FC1C149AFBF4C8996FB9...B855', status: 'active', statusHistory: [{ status: 'active', timestamp: '2026-06-21T10:00:00Z', updatedBy: 'MIT Registrar Office', reason: 'Official academic approval signed' }] }
 ];
 
 const DEFAULT_SETTINGS: SystemSettings = {
@@ -675,18 +476,12 @@ const DEFAULT_SETTINGS: SystemSettings = {
   biometricSimulationMode: false
 };
 
-// SOC Default Mock Alerts
 const DEFAULT_SOC_EVENTS: SocEvent[] = [
-  { id: 'soc-1', severity: 'critical', category: 'CERTIFICATE_TAMPER', details: 'AI Exception: Calculated hash mismatch on certificate CERT-2026-0002. Local copy modified.', timestamp: '2026-06-23T09:40:00Z', ip: '198.51.100.4', handled: false },
-  { id: 'soc-2', severity: 'high', category: 'BIOMETRIC_FAIL', details: 'Spoof Prevention: Candidate failed facial blink checkpoint verification twice.', timestamp: '2026-06-23T10:15:00Z', ip: '203.0.113.12', handled: false },
-  { id: 'soc-3', severity: 'medium', category: 'SUSPICIOUS_LOGIN', details: 'Anomalous User: Account mit logged in from unknown browser user-agent & resolution.', timestamp: '2026-06-23T10:30:00Z', ip: '18.9.22.4', handled: true },
-  { id: 'soc-4', severity: 'low', category: 'OTP_REQUEST', details: 'Session authorization: OTP dispatched to mobile register +1 (555) 019-8822.', timestamp: '2026-06-23T10:45:00Z', ip: '127.0.0.1', handled: true }
+  { id: 'soc-1', severity: 'critical', category: 'CERTIFICATE_TAMPER', details: 'AI Exception: Calculated hash mismatch on certificate CERT-2026-0002. Local copy modified.', timestamp: '2026-06-23T09:40:00Z', ip: '198.51.100.4', handled: false }
 ];
 
 const DEFAULT_LOGIN_HISTORY: LoginHistoryEntry[] = [
-  { id: 'lh-1', userId: 'usr-madhan', username: 'madhan', timestamp: '2026-06-23T10:40:00Z', ip: '127.0.0.1', device: 'Chrome 126.0 / Windows 11 (Desktop)', status: 'success' },
-  { id: 'lh-2', userId: 'usr-mit', username: 'mit', timestamp: '2026-06-23T10:10:00Z', ip: '18.9.22.4', device: 'Safari 17.4 / MacOS (Desktop)', status: 'success' },
-  { id: 'lh-3', userId: 'usr-madhan', username: 'madhan', timestamp: '2026-06-23T09:12:00Z', ip: '198.51.100.8', device: 'Firefox 125.0 / Android 14 (Mobile)', status: 'failure', reason: 'Incorrect password key input' }
+  { id: 'lh-1', userId: 'usr-madhan', username: 'madhan', timestamp: '2026-06-23T10:40:00Z', ip: '127.0.0.1', device: 'Chrome 126.0 / Windows 11 (Desktop)', status: 'success' }
 ];
 
 const DEFAULT_ACTIVE_SESSIONS: ActiveSession[] = [
@@ -694,59 +489,31 @@ const DEFAULT_ACTIVE_SESSIONS: ActiveSession[] = [
 ];
 
 const DEFAULT_FRAUD_REPORTS: FraudReport[] = [
-  { id: 'fraud-1', category: 'tampered_cert', riskScore: 85, details: 'Certificate CERT-2026-0002 has altered GPA values in database storage.', timestamp: '2026-06-23T09:40:00Z', status: 'active' },
-  { id: 'fraud-2', category: 'suspicious_login', riskScore: 42, details: 'User account mit logged in from unrecognized IP range 18.9.22.4.', timestamp: '2026-06-23T10:30:00Z', status: 'mitigated' }
+  { id: 'fraud-1', category: 'tampered_cert', riskScore: 85, details: 'Certificate CERT-2026-0002 has altered GPA values in database storage.', timestamp: '2026-06-23T09:40:00Z', status: 'active' }
 ];
 
 const DEFAULT_CAMPUSES: Campus[] = [
-  { id: 'cmp-mit-main', institutionId: 'inst-mit', name: 'Cambridge Main Campus', location: 'Cambridge, MA', adminName: 'Dr. Arthur Pendelton', adminEmail: 'dean.cambridge@mit.edu' },
-  { id: 'cmp-mit-med', institutionId: 'inst-mit', name: 'Boston Medical Campus', location: 'Boston, MA', adminName: 'Dr. Clara Oswald', adminEmail: 'dean.medical@mit.edu' },
-  { id: 'cmp-mit-lincoln', institutionId: 'inst-mit', name: 'Lincoln Laboratories Campus', location: 'Lexington, MA', adminName: 'Dr. John Smith', adminEmail: 'dean.lincoln@mit.edu' }
+  { id: 'cmp-mit-main', institutionId: 'inst-mit', name: 'Cambridge Main Campus', location: 'Cambridge, MA', adminName: 'Dr. Arthur Pendelton', adminEmail: 'dean.cambridge@mit.edu' }
 ];
 
 const DEFAULT_DEPARTMENTS: Department[] = [
-  { id: 'dept-mit-cs', institutionId: 'inst-mit', campusId: 'cmp-mit-main', name: 'Computer Science', code: 'CS', headName: 'Prof. Harold Abelson' },
-  { id: 'dept-mit-ee', institutionId: 'inst-mit', campusId: 'cmp-mit-main', name: 'Electrical Engineering', code: 'EE', headName: 'Prof. Mildred Dresselhaus' },
-  { id: 'dept-mit-me', institutionId: 'inst-mit', campusId: 'cmp-mit-main', name: 'Mechanical Engineering', code: 'ME', headName: 'Prof. Stephen H. Crandall' },
-  { id: 'dept-mit-med', institutionId: 'inst-mit', campusId: 'cmp-mit-med', name: 'Cybernetics & Artificial Organs', code: 'CYB', headName: 'Prof. Sarah Connor' }
+  { id: 'dept-mit-cs', institutionId: 'inst-mit', campusId: 'cmp-mit-main', name: 'Computer Science', code: 'CS', headName: 'Prof. Harold Abelson' }
 ];
 
 const DEFAULT_API_KEYS: ApiKey[] = [
-  { id: 'key-1', institutionId: 'inst-mit', key: 'ae_live_mit_8f3d1c9e4b', name: 'MIT Registrar Main Sync', created: '2026-06-21T10:00:00Z', status: 'active', rateLimit: 1000, usageCount: 242 },
-  { id: 'key-2', institutionId: 'inst-mit', key: 'ae_test_mit_2b9f0a1c3d', name: 'MIT HR Sandbox Portal', created: '2026-06-22T14:30:00Z', status: 'active', rateLimit: 100, usageCount: 15 }
+  { id: 'key-1', institutionId: 'inst-mit', key: 'ae_live_mit_8f3d1c9e4b', name: 'MIT Registrar Main Sync', created: '2026-06-21T10:00:00Z', status: 'active', rateLimit: 1000, usageCount: 242 }
 ];
 
 const DEFAULT_API_LOGS: ApiLog[] = [
-  { id: 'apil-1', apiKeyId: 'key-1', timestamp: '2026-07-02T09:12:00Z', method: 'GET', endpoint: '/api/v1/certificates/CERT-2026-0001', status: 200, responseTime: 82, ip: '198.51.100.4' },
-  { id: 'apil-2', apiKeyId: 'key-1', timestamp: '2026-07-02T09:30:00Z', method: 'POST', endpoint: '/api/v1/verification/verify-hash', status: 200, responseTime: 124, ip: '198.51.100.4' },
-  { id: 'apil-3', apiKeyId: 'key-2', timestamp: '2026-07-02T09:45:00Z', method: 'GET', endpoint: '/api/v1/students/MIT-2024-082', status: 200, responseTime: 95, ip: '203.0.113.12' }
+  { id: 'apil-1', apiKeyId: 'key-1', timestamp: '2026-07-02T09:12:00Z', method: 'GET', endpoint: '/api/v1/certificates/CERT-2026-0001', status: 200, responseTime: 82, ip: '198.51.100.4' }
 ];
 
 const DEFAULT_OCR_REPORTS: OcrReport[] = [
-  {
-    id: 'ocr-1',
-    timestamp: '2026-07-01T15:20:00Z',
-    fileName: 'Alex_Johnson_Diploma.pdf',
-    fileSize: '1.4 MB',
-    authenticityScore: 99.4,
-    forgeryProbability: 0.6,
-    confidenceScore: 98.2,
-    riskClassification: 'low',
-    extractedFields: {
-      studentName: 'Alex Johnson',
-      rollNo: 'MIT-2024-082',
-      degree: 'Bachelor of Science',
-      cgpa: '3.91',
-      issueDate: '2026-06-21',
-      signatureFound: true,
-      sealFound: true
-    }
-  }
+  { id: 'ocr-1', timestamp: '2026-07-01T15:20:00Z', fileName: 'Alex_Johnson_Diploma.pdf', fileSize: '1.4 MB', authenticityScore: 99.4, forgeryProbability: 0.6, confidenceScore: 98.2, riskClassification: 'low', extractedFields: { studentName: 'Alex Johnson', rollNo: 'MIT-2024-082', degree: 'Bachelor of Science', cgpa: '3.91', issueDate: '2026-06-21', signatureFound: true, sealFound: true } }
 ];
 
 const DEFAULT_BACKUP_SNAPSHOTS: BackupSnapshot[] = [
-  { id: 'snap-1', timestamp: '2026-07-01T00:00:00Z', hash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', size: '2.4 MB', type: 'scheduled', encryptionKey: 'AES-256-GENESIS-KEY-SNAPSHOT', status: 'success' },
-  { id: 'snap-2', timestamp: '2026-07-02T00:00:00Z', hash: '8f3d1c9e4b2b9f0a1c3de3b0c44298fc1c149afbf4c8996fb92427ae41e4649b', size: '2.5 MB', type: 'automatic', encryptionKey: 'AES-256-SYSTEM-AUTO-KEY', status: 'success' }
+  { id: 'snap-1', timestamp: '2026-07-01T00:00:00Z', hash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', size: '2.4 MB', type: 'scheduled', encryptionKey: 'AES-256-GENESIS-KEY-SNAPSHOT', status: 'success' }
 ];
 
 const DEFAULT_RECOVERY_LOGS: RecoveryLog[] = [
@@ -754,129 +521,38 @@ const DEFAULT_RECOVERY_LOGS: RecoveryLog[] = [
 ];
 
 const DEFAULT_DEVICE_REGISTRATIONS: DeviceRegistration[] = [
-  { id: 'dev-1', userId: 'usr-student', token: 'token_apns_alex_iphone_99182', deviceName: 'Alex\'s iPhone 15 Pro', os: 'iOS 17.5', registeredAt: '2026-06-21T10:05:00Z' }
+  { id: 'dev-1', userId: 'usr-student', token: 'token_apns_alex_iphone_99182', deviceName: "Alex's iPhone 15 Pro", os: 'iOS 17.5', registeredAt: '2026-06-21T10:05:00Z' }
 ];
 
 const DEFAULT_NOTIFICATIONS: PushNotification[] = [
-  { id: 'ntf-1', userId: 'usr-student', title: 'Degree Issued & Anchored', body: 'Your Bachelor of Science certificate has been successfully written to block #1042.', timestamp: '2026-06-21T10:01:00Z', read: true, severity: 'low' },
-  { id: 'ntf-2', userId: 'usr-mit', title: 'Database Security Integrity Verified', body: 'Daily Merkle digest validation successful. Expected match verified.', timestamp: '2026-07-02T08:00:00Z', read: false, severity: 'low' }
+  { id: 'ntf-1', userId: 'usr-student', title: 'Degree Issued & Anchored', body: 'Your Bachelor of Science certificate has been successfully written to block #1042.', timestamp: '2026-06-21T10:01:00Z', read: true, severity: 'low' }
 ];
 
 const DEFAULT_HELP_ARTICLES: HelpArticle[] = [
-  {
-    id: 'art-login',
-    category: 'Getting Started',
-    title: 'Logging in to AegisCert',
-    body: 'To access the AegisCert platform:\n1. Choose your account role from the dropdown menu (Super Admin, Institution Admin, Student, or Verifier).\n2. Provide your registered username and password.\n3. Complete the 6-digit MPIN verification code step.\n\n*Troubleshooting*: If your account is locked due to multiple failed login attempts, wait 15 minutes for automatic cooldown release.',
-    keywords: ['login', 'signin', 'mpin', 'auth', 'locked'],
-    relatedRoutes: ['login', 'register']
-  },
-  {
-    id: 'art-issuance',
-    category: 'Certificates',
-    title: 'Issuing a Verifiable Certificate',
-    body: 'Institution administrators can issue credentials manually:\n1. Navigate to the **Issue Certificate** section from the sidebar.\n2. Complete the candidate details: Student Name, Date of Birth, Registration ID, and Year of Passout.\n3. Enter the final academic GPA/CGPA.\n4. Upload the official marksheet PDF.\n5. Press "Issue Verifiable Certificate" to initialize blockchain anchoring.\n\n*Important*: The platform calculates the cryptographic SHA-256 hash of the entries and signs it using the university registry keys before committing it to the EVM blockchain.',
-    keywords: ['issue', 'issuance', 'degree', 'gpa', 'marksheet'],
-    relatedRoutes: ['issuance', 'institution-dashboard']
-  },
-  {
-    id: 'art-biometrics',
-    category: 'Biometrics',
-    title: 'Mantra MFS100 Fingerprint Integration',
-    body: 'AegisCert implements biometric identification using the Mantra MFS100 device:\n1. Connect the Mantra MFS100 scanner USB to your machine.\n2. In the "Biometric Register" center, press "Initialize Hardware Scan".\n3. Place your finger on the lens to capture ridge details.\n4. The system stores biometric minutiae hashes in an isolated local storage table.\n\n*RD Service error*: Verify that the Mantra RD Service daemon is running locally on port 11100.',
-    keywords: ['biometric', 'fingerprint', 'scanner', 'mantra', 'mfs100', 'rd service'],
-    relatedRoutes: ['fingerprint-management', 'profile']
-  },
-  {
-    id: 'art-blockchain',
-    category: 'Blockchain',
-    title: 'Decentralized Consensus Audits',
-    body: 'Academic credential records are anchored to the blockchain consensus ledger:\n- **Immutability**: Once written, certificate details cannot be deleted or modified.\n- **Status checks**: Verifiers lookup hashes to verify active status or audit suspensions.\n- **Zero-knowledge proof**: The document remains private; only the computed checksum is validated on-chain.',
-    keywords: ['blockchain', 'explorer', 'hash', 'ledger', 'checksum'],
-    relatedRoutes: ['blockchain-explorer', 'verification']
-  }
+  { id: 'art-login', category: 'Getting Started', title: 'Logging in to AegisCert', body: 'To access the AegisCert platform:\n1. Choose your account role from the dropdown menu.\n2. Provide your registered username and password.\n3. Complete the 6-digit MPIN verification code step.', keywords: ['login', 'signin', 'mpin', 'auth'], relatedRoutes: ['login', 'register'] }
 ];
 
 const DEFAULT_FAQS: FAQ[] = [
-  {
-    id: 'faq-1',
-    category: 'Authentication',
-    question: 'How do I recover my MPIN?',
-    answer: 'If you forgot your 6-digit MPIN, click "Forgot Password" on the login screen. Verify your registered email address, complete the OTP confirmation steps, and enter a new MPIN code.'
-  },
-  {
-    id: 'faq-2',
-    category: 'Certificates',
-    question: 'How do I verify a certificate?',
-    answer: 'Go to the public "Verify Status" page, drag-and-drop the certificate PDF document or enter its computed SHA-256 ledger checksum hash. The verification node will audit the record integrity on the blockchain.'
-  },
-  {
-    id: 'faq-3',
-    category: 'Security',
-    question: 'What is the SOC Security Suite?',
-    answer: 'The Security Operations Center (SOC) dashboard displays real-time network threats, brute-force logs, and honeypot intrusion triggers to defend against unauthorized registrar activities.'
-  }
+  { id: 'faq-1', category: 'Authentication', question: 'How do I recover my MPIN?', answer: 'Click "Forgot Password" on the login screen and complete the recovery steps.' }
 ];
 
 const DEFAULT_SUPPORT_TICKETS: SupportTicket[] = [
-  {
-    id: 'tkt-101',
-    userId: 'usr-student',
-    userName: 'Alex Johnson',
-    userRole: 'student',
-    category: 'Biometrics',
-    subject: 'Mantra MFS100 Device Not Found',
-    message: 'I am trying to enroll my fingerprint, but the portal prints "RD Service check failed". I have connected my scanner. How do I fix this?',
-    status: 'open',
-    timestamp: '2026-07-02T09:00:00Z',
-    replies: []
-  }
+  { id: 'tkt-101', userId: 'usr-student', userName: 'Alex Johnson', userRole: 'student', category: 'Biometrics', subject: 'Mantra MFS100 Device Not Found', message: 'I am trying to enroll my fingerprint, but the portal prints "RD Service check failed". How do I fix this?', status: 'open', timestamp: '2026-07-02T09:00:00Z', replies: [] }
 ];
 
 const DEFAULT_FEEDBACK: Feedback[] = [
-  {
-    id: 'fb-1',
-    userId: 'usr-student',
-    userName: 'Alex Johnson',
-    type: 'suggestion',
-    title: 'Dark Mode Custom Colors',
-    description: 'It would be nice if the credential wallet dashboard allowed choosing custom dark mode gradient cards.',
-    timestamp: '2026-07-02T09:30:00Z',
-    status: 'open'
-  }
+  { id: 'fb-1', userId: 'usr-student', userName: 'Alex Johnson', type: 'suggestion', title: 'Dark Mode Custom Colors', description: 'It would be nice if the credential wallet dashboard allowed choosing custom dark mode gradient cards.', timestamp: '2026-07-02T09:30:00Z', status: 'open' }
 ];
 
 const DEFAULT_TROUBLESHOOTING_GUIDES: TroubleshootingGuide[] = [
-  {
-    id: 'trb-1',
-    problem: 'RD Service missing / Port blocked',
-    reason: 'The local Mantra driver service is not running or port 11100 is occupied.',
-    resolution: 'Start the "Mantra RD Service" in your local system services manager. Verify port 11100 is not blocked by Windows Defender Firewall.',
-    recommendedAction: 'Restart Mantra Service',
-    category: 'Biometrics'
-  },
-  {
-    id: 'trb-2',
-    problem: 'Blockchain verification failed',
-    reason: 'The document file has been tampered with or modified since issuance, causing a SHA-256 hash mismatch.',
-    resolution: 'Request the registrar to issue a new credential or double-check that you uploaded the original, unedited PDF marksheet.',
-    recommendedAction: 'Inspect Checksum Hash',
-    category: 'Blockchain'
-  }
+  { id: 'trb-1', problem: 'RD Service missing / Port blocked', reason: 'The local Mantra driver service is not running or port 11100 is occupied.', resolution: 'Start the "Mantra RD Service" in your local system services manager.', recommendedAction: 'Restart Mantra Service', category: 'Biometrics' }
 ];
 
 const DEFAULT_RECENT_SEARCHES: RecentSearch[] = [
-  {
-    id: 'search-1',
-    userId: 'usr-student',
-    query: 'fingerprint scanner',
-    timestamp: '2026-07-02T10:00:00Z'
-  }
+  { id: 'search-1', userId: 'usr-student', query: 'fingerprint scanner', timestamp: '2026-07-02T10:00:00Z' }
 ];
 
-// Cryptographic Database Digest Calculator (Merkle-Root-like simulation)
 function calculateDatabaseDigest(): string {
-  if (typeof window === 'undefined') return 'verified_genesis_merkle_root_secure';
   const keys = [
     'users', 'institutions', 'certificates', 'socEvents', 'fraudReports', 
     'loginHistory', 'campuses', 'departments', 'apiKeys', 'apiLogs', 
@@ -886,7 +562,7 @@ function calculateDatabaseDigest(): string {
   ];
   let combined = '';
   keys.forEach(k => {
-    combined += localStorage.getItem(`csv_enc_${k}`) || '';
+    combined += JSON.stringify(dbCache[k] || '');
   });
   
   let hashVal = 0;
@@ -897,7 +573,6 @@ function calculateDatabaseDigest(): string {
   return 'sha256-merkle-' + Math.abs(hashVal).toString(16).padEnd(32, '0');
 }
 
-// Global memory cache representing the active database tables state
 const dbCache: Record<string, any> = {
   users: DEFAULT_USERS,
   institutions: DEFAULT_INSTITUTIONS,
@@ -922,7 +597,7 @@ const dbCache: Record<string, any> = {
   feedback: DEFAULT_FEEDBACK,
   troubleshootingGuides: DEFAULT_TROUBLESHOOTING_GUIDES,
   recentSearches: DEFAULT_RECENT_SEARCHES,
-  blockchainLedger: [] // Loaded dynamically from SQLite database
+  blockchainLedger: []
 };
 
 const keyToTableMap: Record<string, string> = {
@@ -952,26 +627,33 @@ const keyToTableMap: Record<string, string> = {
   blockchainLedger: 'blockchain_ledger'
 };
 
-function loadFromLocalStorageFallback() {
-  Object.keys(dbCache).forEach(key => {
+async function loadFromLocalStorageFallback() {
+  const keys = Object.keys(dbCache);
+  for (const key of keys) {
     const stored = localStorage.getItem(`csv_enc_${key}`);
     if (stored) {
       try {
-        const plain = decryptData(stored);
+        const plain = await decryptData(stored);
         if (plain) {
           dbCache[key] = JSON.parse(plain);
         }
       } catch (e) {}
     }
-  });
+  }
 }
 
-// Initialize database cache by loading from Supabase Cloud PostgreSQL or Express SQLite
 export async function initializeDbConnection(): Promise<void> {
   const apiUrl = import.meta.env.VITE_API_URL || '';
+  const jwtToken = sessionStorage.getItem('csv_jwt_token') || '';
+
   if (apiUrl) {
     try {
-      const response = await fetch(`${apiUrl}/api/initialize`);
+      const headers: Record<string, string> = {};
+      if (jwtToken) {
+        headers['Authorization'] = `Bearer ${jwtToken}`;
+      }
+
+      const response = await fetch(`${apiUrl}/api/initialize`, { headers });
       if (response.ok) {
         const result = await response.json();
         if (result.success) {
@@ -980,77 +662,18 @@ export async function initializeDbConnection(): Promise<void> {
               dbCache[key] = result[key];
             }
           });
-          console.log('Successfully synchronized memory cache with Express SQLite database.');
+          console.log('Synchronized memory cache with Express SQLite database.');
           return;
         }
       }
     } catch (err) {
-      console.warn('Express SQLite connection failed, trying Supabase or fallback:', err);
+      console.warn('Express server connection offline, trying fallback:', err);
     }
   }
 
-  if (!supabase) {
-    loadFromLocalStorageFallback();
-    return;
-  }
-  try {
-    const keys = Object.keys(keyToTableMap);
-    const promises = keys.map(key => supabase!.from(keyToTableMap[key]).select('*'));
-    const results = await Promise.all(promises);
-
-    results.forEach((res, index) => {
-      const key = keys[index];
-      if (res.error) {
-        console.warn(`Failed to fetch Supabase table ${keyToTableMap[key]}:`, res.error);
-        return;
-      }
-      if (res.data) {
-        let parsedData = res.data;
-        if (key === 'settings') {
-          const settingsObj: Record<string, any> = {};
-          res.data.forEach((s: any) => {
-            if (s.value === 'true') settingsObj[s.key] = true;
-            else if (s.value === 'false') settingsObj[s.key] = false;
-            else settingsObj[s.key] = s.value;
-          });
-          dbCache['settings'] = { ...DEFAULT_SETTINGS, ...settingsObj };
-        } else {
-          parsedData = res.data.map((row: any) => {
-            const parsedRow = { ...row };
-            if (key === 'certificates' && typeof row.statusHistory === 'string') {
-              try { parsedRow.statusHistory = JSON.parse(row.statusHistory); } catch (e) {}
-            }
-            if (key === 'ocrReports' && typeof row.detailedAnalyses === 'string') {
-              try { parsedRow.detailedAnalyses = JSON.parse(row.detailedAnalyses); } catch (e) {}
-            }
-            if (key === 'helpArticles') {
-              if (typeof row.keywords === 'string') {
-                try { parsedRow.keywords = JSON.parse(row.keywords); } catch (e) {}
-              }
-              if (typeof row.relatedRoutes === 'string') {
-                try { parsedRow.relatedRoutes = JSON.parse(row.relatedRoutes); } catch (e) {}
-              }
-            }
-            if (key === 'supportTickets' && typeof row.replies === 'string') {
-              try { parsedRow.replies = JSON.parse(row.replies); } catch (e) {}
-            }
-            if (key === 'blockchainLedger' && typeof row.transactions === 'string') {
-              try { parsedRow.transactions = JSON.parse(row.transactions); } catch (e) {}
-            }
-            return parsedRow;
-          });
-          dbCache[key] = parsedData;
-        }
-      }
-    });
-    console.log('Successfully synchronized memory cache with Supabase Cloud PostgreSQL.');
-  } catch (err) {
-    console.warn('Supabase connection failed, falling back to local storage cache:', err);
-    loadFromLocalStorageFallback();
-  }
+  await loadFromLocalStorageFallback();
 }
 
-// Helper wrappers
 const getStored = <T>(key: string, defaultValue: T): T => {
   if (dbCache[key] !== undefined) {
     return dbCache[key] as T;
@@ -1058,11 +681,13 @@ const getStored = <T>(key: string, defaultValue: T): T => {
   return defaultValue;
 };
 
-const setStored = <T>(key: string, data: T): void => {
+const setStored = async <T>(key: string, data: T): Promise<void> => {
+  const oldData = dbCache[key] || [];
   dbCache[key] = data;
 
   try {
-    localStorage.setItem(`csv_enc_${key}`, encryptData(JSON.stringify(data)));
+    const enc = await encryptData(JSON.stringify(data));
+    localStorage.setItem(`csv_enc_${key}`, enc);
   } catch (e) {}
 
   if (key !== 'settings') {
@@ -1070,29 +695,73 @@ const setStored = <T>(key: string, data: T): void => {
       const settings = getStored('settings', DEFAULT_SETTINGS);
       settings.dbIntegrityHash = calculateDatabaseDigest();
       dbCache['settings'] = settings;
-      localStorage.setItem('csv_enc_settings', encryptData(JSON.stringify(settings)));
+      const encSettings = await encryptData(JSON.stringify(settings));
+      localStorage.setItem('csv_enc_settings', encSettings);
     } catch (e) {}
   }
 
-  // Sync to Express SQLite
+  // Sync to Express REST APIs
   const apiUrl = import.meta.env.VITE_API_URL || '';
-  if (apiUrl) {
-    try {
-      const tableName = keyToTableMap[key];
-      if (tableName) {
-        fetch(`${apiUrl}/api/sync`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ table: key, data })
-        }).then(res => {
-          if (!res.ok) {
-            console.warn(`Express SQLite sync error on table ${key}`);
-          }
-        }).catch(err => {
-          console.error(`Express SQLite sync exception on table ${key}:`, err);
+  const jwt = sessionStorage.getItem('csv_jwt_token') || '';
+  if (apiUrl && jwt) {
+    const tableName = keyToTableMap[key];
+    if (tableName) {
+      if (key === 'settings') {
+        fetch(`${apiUrl}/api/settings`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${jwt}`
+          },
+          body: JSON.stringify(data)
+        }).catch(err => console.error(err));
+      } else if (Array.isArray(oldData) && Array.isArray(data)) {
+        const oldMap = new Map(oldData.map(item => [item.id || item.number, item]));
+        const newMap = new Map((data as any[]).map(item => [item.id || item.number, item]));
+
+        const added = (data as any[]).filter(item => !oldMap.has(item.id || item.number));
+        const deleted = oldData.filter(item => !newMap.has(item.id || item.number));
+        const updated = (data as any[]).filter(item => {
+          const oldVal = oldMap.get(item.id || item.number);
+          return oldVal && JSON.stringify(oldVal) !== JSON.stringify(item);
         });
+
+        const primaryKeyName = (key === 'blockchainLedger') ? 'number' : 'id';
+
+        for (const item of added) {
+          fetch(`${apiUrl}/api/resources/${tableName}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${jwt}`
+            },
+            body: JSON.stringify(item)
+          }).catch(err => console.error(err));
+        }
+
+        for (const item of updated) {
+          const idVal = item[primaryKeyName];
+          fetch(`${apiUrl}/api/resources/${tableName}/${idVal}`, {
+            method: 'PATCH',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${jwt}`
+            },
+            body: JSON.stringify(item)
+          }).catch(err => console.error(err));
+        }
+
+        for (const item of deleted) {
+          const idVal = item[primaryKeyName];
+          fetch(`${apiUrl}/api/resources/${tableName}/${idVal}`, {
+            method: 'DELETE',
+            headers: {
+              'Authorization': `Bearer ${jwt}`
+            }
+          }).catch(err => console.error(err));
+        }
       }
-    } catch (e) {}
+    }
   }
 
   // Sync to Supabase
@@ -1214,7 +883,6 @@ export const db = {
   ) => {
     const logs = db.getAuditLogs();
     
-    // Calculate simulated risk score (0-100)
     let riskScore = 8;
     if (status === 'failure') {
       riskScore = 75;
@@ -1234,23 +902,21 @@ export const db = {
       riskScore = riskScoreOverride;
     }
 
-    // Determine device fingerprint
-    let deviceFingerprint = 'AegisDFP-' + Math.abs(action.length * 12345).toString(16).toUpperCase();
+    let deviceFingerprint = 'AegisDFP-' + crypto.randomUUID().slice(0, 8).toUpperCase();
     if (deviceFingerprintOverride) {
       deviceFingerprint = deviceFingerprintOverride;
     } else if (typeof window !== 'undefined' && window.navigator) {
       deviceFingerprint = 'AegisDFP-' + btoa(window.navigator.userAgent).slice(0, 16);
     }
 
-    // Determine location
-    const locations = ['Boston, MA', 'New York, NY', 'San Francisco, CA', 'Austin, TX', 'Chennai, India', 'London, UK'];
+    const locations = ['Boston, MA', 'New York, NY', 'San Francisco, CA', 'Austin, TX', 'London, UK'];
     let location = locations[Math.abs((userId.length + action.length) % locations.length)];
     if (locationOverride) {
       location = locationOverride;
     }
 
     const newLog: AuditLog = {
-      id: `log-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      id: crypto.randomUUID(),
       timestamp: new Date().toISOString(),
       userId,
       userName,
@@ -1267,41 +933,6 @@ export const db = {
     db.setAuditLogs(logs);
   },
 
-  // JWT session simulation
-  generateJWT: (user: User): string => {
-    const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-    const payload = btoa(JSON.stringify({
-      userId: user.id,
-      username: user.username,
-      role: user.role,
-      exp: Date.now() + 15 * 60 * 1000 // 15 mins expiry
-    }));
-    const signature = hashPassword(header + '.' + payload);
-    return `${header}.${payload}.${signature}`;
-  },
-
-  verifyJWT: (token: string): { userId: string; username: string; role: string } | null => {
-    if (!token) return null;
-    const parts = token.split('.');
-    if (parts.length !== 3) return null;
-    try {
-      const headerRaw = atob(parts[0]);
-      const payloadRaw = atob(parts[1]);
-      const signature = parts[2];
-      
-      const expectedSignature = hashPassword(parts[0] + '.' + parts[1]);
-      if (signature !== expectedSignature) return null;
-
-      const payload = JSON.parse(payloadRaw);
-      if (payload.exp < Date.now()) {
-        return null; // Expired
-      }
-      return payload;
-    } catch (e) {
-      return null;
-    }
-  },
-
   getCurrentUser: (): User | null => {
     const userStr = sessionStorage.getItem('csv_current_user');
     return userStr ? JSON.parse(userStr) : null;
@@ -1312,21 +943,25 @@ export const db = {
       sessionStorage.setItem('csv_current_user', JSON.stringify(user));
     } else {
       sessionStorage.removeItem('csv_current_user');
+      sessionStorage.removeItem('csv_jwt_token');
     }
   },
 
-  // OTP Subsystem
+  // OTP Subsystem - Server-safe simulator logs code only to console
   sendOTP: (contactOrEmail: string): string => {
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const array = new Uint32Array(1);
+    crypto.getRandomValues(array);
+    const code = (100000 + (array[0] % 900000)).toString();
     sessionStorage.setItem(`otp_${contactOrEmail}`, code);
     
-    db.addAuditLog('otp-service', 'OTP Daemon', 'admin', 'OTP_SENT', `Generated secure OTP for ${contactOrEmail}. Code: ${code} (Developer Alert)`, 'success');
-    
-    // SOC log
-    db.addSocEvent('medium', 'OTP_REQUEST', `One-Time Password requested by ${contactOrEmail}`, '127.0.0.1');
+    // Stop writing OTP code to audit logs - Phase 2.7
+    db.addAuditLog('otp-service', 'OTP Daemon', 'admin', 'OTP_SENT', `Generated secure OTP for authentication validation challenge`, 'success');
+    db.addSocEvent('medium', 'OTP_REQUEST', `One-Time Password requested by validation target`, '127.0.0.1');
 
-    // Trigger visual gateway simulation event
-    const event = new CustomEvent('OTP_DISPATCHED', { detail: { contact: contactOrEmail, code } });
+    console.log(`[SERVER SMS SIMULATOR] OTP code for ${contactOrEmail} is: ${code}`);
+
+    // Trigger local CustomEvent without code (it will be verified in mock, but on-screen displays won't see it)
+    const event = new CustomEvent('OTP_DISPATCHED', { detail: { contact: contactOrEmail } });
     window.dispatchEvent(event);
 
     return code;
@@ -1341,11 +976,10 @@ export const db = {
     return false;
   },
 
-  // SOC Add Events
   addSocEvent: (severity: 'critical' | 'high' | 'medium' | 'low', category: string, details: string, ip: string) => {
     const events = db.getSocEvents();
     const newEvent: SocEvent = {
-      id: `soc-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      id: crypto.randomUUID(),
       severity,
       category,
       details,
@@ -1357,10 +991,8 @@ export const db = {
     db.setSocEvents(events);
   },
 
-  // AI Fraud Add Event
   addFraudReport: (category: 'duplicate_cert' | 'biometric_spoof' | 'unauthorized_mod' | 'suspicious_login' | 'tampered_cert', riskScore: number, details: string) => {
     const reports = db.getFraudReports();
-    // Avoid duplicate reports of the same category and details within the last 10 seconds
     const isDuplicate = reports.some(r => 
       r.category === category && 
       r.details === details && 
@@ -1369,7 +1001,7 @@ export const db = {
     if (isDuplicate) return;
 
     const newReport: FraudReport = {
-      id: `fraud-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      id: crypto.randomUUID(),
       category,
       riskScore,
       details,
@@ -1392,7 +1024,7 @@ export const db = {
     };
   },
 
-  rotateDatabaseKeys: (): { success: boolean; newKey: string; recordsEncrypted: number } => {
+  rotateDatabaseKeys: async (): Promise<{ success: boolean; newKey: string; recordsEncrypted: number }> => {
     try {
       const currentUsers = db.getUsers();
       const currentInsts = db.getInstitutions();
@@ -1404,34 +1036,35 @@ export const db = {
       const currentSettings = db.getSettings();
 
       const prevKey = getActiveKey();
-      const nextKey = 'AEGISKEY_ROTATED_AES_' + Math.floor(100000 + Math.random() * 900000).toString(16).toUpperCase();
+      const array = new Uint32Array(1);
+      crypto.getRandomValues(array);
+      const nextKey = 'AEGISKEY_ROTATED_AES_' + array[0].toString(16).toUpperCase();
       
       localStorage.setItem('csv_active_aes_key', nextKey);
 
-      db.setUsers(currentUsers);
-      db.setInstitutions(currentInsts);
-      db.setCertificates(currentCerts);
-      db.setAuditLogs(currentLogs);
-      db.setSocEvents(currentSoc);
-      db.setFraudReports(currentFraud);
-      db.setLoginHistory(currentHist);
+      await setStored('users', currentUsers);
+      await setStored('institutions', currentInsts);
+      await setStored('certificates', currentCerts);
+      await setStored('auditLogs', currentLogs);
+      await setStored('socEvents', currentSoc);
+      await setStored('fraudReports', currentFraud);
+      await setStored('loginHistory', currentHist);
       
-      // Rotate expanded enterprise tables
-      db.setCampuses(db.getCampuses());
-      db.setDepartments(db.getDepartments());
-      db.setApiKeys(db.getApiKeys());
-      db.setApiLogs(db.getApiLogs());
-      db.setOcrReports(db.getOcrReports());
-      db.setBackupSnapshots(db.getBackupSnapshots());
-      db.setRecoveryLogs(db.getRecoveryLogs());
-      db.setDeviceRegistrations(db.getDeviceRegistrations());
-      db.setNotifications(db.getNotifications());
-      db.setHelpArticles(db.getHelpArticles());
-      db.setFAQs(db.getFAQs());
-      db.setSupportTickets(db.getSupportTickets());
-      db.setFeedback(db.getFeedback());
-      db.setTroubleshootingGuides(db.getTroubleshootingGuides());
-      db.setRecentSearches(db.getRecentSearches());
+      await setStored('campuses', db.getCampuses());
+      await setStored('departments', db.getDepartments());
+      await setStored('apiKeys', db.getApiKeys());
+      await setStored('apiLogs', db.getApiLogs());
+      await setStored('ocrReports', db.getOcrReports());
+      await setStored('backupSnapshots', db.getBackupSnapshots());
+      await setStored('recoveryLogs', db.getRecoveryLogs());
+      await setStored('deviceRegistrations', db.getDeviceRegistrations());
+      await setStored('notifications', db.getNotifications());
+      await setStored('helpArticles', db.getHelpArticles());
+      await setStored('faqs', db.getFAQs());
+      await setStored('supportTickets', db.getSupportTickets());
+      await setStored('feedback', db.getFeedback());
+      await setStored('troubleshootingGuides', db.getTroubleshootingGuides());
+      await setStored('recentSearches', db.getRecentSearches());
 
       const history = currentSettings.keyRotationHistory || [];
       history.push(`Rotated from ${prevKey.slice(0, 8)}... to ${nextKey.slice(0, 8)}... on ${new Date().toISOString()}`);
@@ -1443,11 +1076,11 @@ export const db = {
         dbIntegrityHash: ''
       };
       
-      db.setSettings(updatedSettings);
+      await setStored('settings', updatedSettings);
       
       const newDigest = calculateDatabaseDigest();
       updatedSettings.dbIntegrityHash = newDigest;
-      db.setSettings(updatedSettings);
+      await setStored('settings', updatedSettings);
 
       db.addAuditLog('usr-madhan', 'Mr. MADHAN', 'admin', 'CRYPTOGRAPHIC_KEY_ROTATED', `Successfully rotated database AES-256 encryption keys.`, 'success');
 
@@ -1459,6 +1092,99 @@ export const db = {
     } catch (e) {
       console.error(e);
       return { success: false, newKey: '', recordsEncrypted: 0 };
+    }
+  },
+
+  // ----------------------------------------------------
+  // BACKEND API INTEGRATIONS
+  // ----------------------------------------------------
+
+  login: async (username: string, password: string, role: string): Promise<{ success: boolean; mustResetPassword?: boolean; error?: string }> => {
+    const apiUrl = import.meta.env.VITE_API_URL || '';
+    if (!apiUrl) {
+      // Local mockup fallback
+      const users = db.getUsers();
+      const user = users.find(u => u.username.toLowerCase() === username.toLowerCase() && u.role === role);
+      if (user) {
+        db.setCurrentUser(user);
+        return { success: true, mustResetPassword: false };
+      }
+      return { success: false, error: 'User not found in local cache.' };
+    }
+
+    try {
+      const response = await fetch(`${apiUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password, role })
+      });
+      if (response.ok) {
+        const result = await response.json();
+        if (result.success) {
+          sessionStorage.setItem('csv_jwt_token', result.token);
+          db.setCurrentUser(result.user);
+          // Re-initialize cache with JWT
+          await initializeDbConnection();
+          return { success: true, mustResetPassword: result.mustResetPassword };
+        }
+      }
+      const errRes = await response.json();
+      return { success: false, error: errRes.error || 'Authentication failed.' };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  },
+
+  resetPassword: async (username: string, role: string, newPassword: string): Promise<boolean> => {
+    const apiUrl = import.meta.env.VITE_API_URL || '';
+    if (!apiUrl) return true;
+    try {
+      const response = await fetch(`${apiUrl}/api/auth/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, role, newPassword })
+      });
+      return response.ok;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  verifyMpin: async (mpin: string): Promise<boolean> => {
+    const apiUrl = import.meta.env.VITE_API_URL || '';
+    const token = sessionStorage.getItem('csv_jwt_token');
+    if (!apiUrl || !token) return true;
+    try {
+      const response = await fetch(`${apiUrl}/api/auth/verify-mpin`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ mpin })
+      });
+      return response.ok;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  setupMpin: async (mpin: string): Promise<boolean> => {
+    const apiUrl = import.meta.env.VITE_API_URL || '';
+    const token = sessionStorage.getItem('csv_jwt_token');
+    if (!apiUrl || !token) return true;
+    try {
+      const response = await fetch(`${apiUrl}/api/auth/setup-mpin`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ mpin })
+      });
+      return response.ok;
+    } catch (e) {
+      return false;
     }
   },
 

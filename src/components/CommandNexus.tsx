@@ -90,7 +90,7 @@ export default function CommandNexus({ isOpen, onClose, navigate }: CommandNexus
     }
   };
 
-  const executeCommand = (action: string) => {
+  const executeCommand = async (action: string) => {
     if (action === 'killswitch') {
       const settings = db.getSettings();
       const nextState = !settings.killSwitchActive;
@@ -110,7 +110,7 @@ export default function CommandNexus({ isOpen, onClose, navigate }: CommandNexus
       }
       window.location.reload();
     } else if (action === 'rotate') {
-      const res = db.rotateDatabaseKeys();
+      const res = await db.rotateDatabaseKeys();
       if (res.success) {
         alert(`Cryptographic key rotated successfully! Re-encrypted ${res.recordsEncrypted} records under key: ${res.newKey.slice(0, 15)}...`);
       } else {

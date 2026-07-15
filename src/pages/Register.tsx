@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Shield, User, Building, Landmark, Mail, Lock, Phone, GraduationCap, AlertCircle, CheckCircle2 } from 'lucide-react';
-import { db, hashPassword } from '../services/db';
+import { db } from '../services/db';
 
 interface RegisterProps {
   navigate: (route: string) => void;
@@ -61,7 +61,7 @@ export default function Register({ navigate }: RegisterProps) {
       const newUser = {
         id: userId,
         username: username,
-        password: hashPassword(password),
+        password: password,
         role: 'institution' as const,
         name: `${name} Representative`,
         email: email,
@@ -82,7 +82,7 @@ export default function Register({ navigate }: RegisterProps) {
       const newUser = {
         id: userId,
         username,
-        password: hashPassword(password),
+        password: password,
         role: 'student' as const,
         name,
         email,
@@ -107,7 +107,7 @@ export default function Register({ navigate }: RegisterProps) {
       const newUser = {
         id: userId,
         username,
-        password: hashPassword(password),
+        password: password,
         role: 'verifier' as const,
         name,
         email,

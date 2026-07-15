@@ -2,6 +2,7 @@ import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import bcrypt from 'bcryptjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,6 +17,17 @@ export async function getDbConnection() {
 
 export async function initializeDatabase() {
   const db = await getDbConnection();
+
+  // Drop users and certificates if schema update is needed to prevent drift
+  try {
+    const info = await db.all("PRAGMA table_info(users)");
+    const hasMustReset = info.some(c => c.name === 'mustResetPassword');
+    if (info.length > 0 && !hasMustReset) {
+      console.log("Upgrading users table: dropping users to re-seed...");
+      await db.exec("DROP TABLE IF EXISTS users");
+      await db.exec("DROP TABLE IF EXISTS certificates");
+    }
+  } catch (e) {}
 
   // Create Users Table
   await db.exec(`
@@ -36,7 +48,8 @@ export async function initializeDatabase() {
       regNo TEXT,
       department TEXT,
       batch TEXT,
-      enrolledAt TEXT
+      enrolledAt TEXT,
+      mustResetPassword INTEGER DEFAULT 1
     )
   `);
 
@@ -384,22 +397,23 @@ export async function initializeDatabase() {
   // 2. Seed Users
   const userCount = await db.get('SELECT COUNT(*) as count FROM users');
   if (userCount.count === 0) {
+    const hash = (p) => bcrypt.hashSync(p, 12);
     const defaultUsers = [
-      { id: 'usr-madhan', username: 'madhan', password: 'bcrypt$12$62637279707424313224376161313437', role: 'admin', name: 'Mr. MADHAN', email: 'madhan@aegiscert.gov', contact: '+1 (555) 019-8822', faceEnrollId: '', fingerprintStatus: 'pending', mpin: '' },
-      { id: 'usr-honeytoken-1', username: 'backup_root', password: 'bcrypt$12$62637279707424313224376161313437', role: 'admin', name: 'Backup System Root Daemon', email: 'honeypot.root@aegiscert.gov', contact: '', faceEnrollId: '', fingerprintStatus: '', mpin: '' },
-      { id: 'usr-honeytoken-2', username: 'database_root', password: 'bcrypt$12$62637279707424313224376161313437', role: 'admin', name: 'Database Administrator Daemon', email: 'honeypot.db@aegiscert.gov', contact: '', faceEnrollId: '', fingerprintStatus: '', mpin: '' },
-      { id: 'usr-mit', username: 'mit', password: 'bcrypt$12$62637279707424313224376161313437', role: 'institution', name: 'MIT Registrar Office', email: 'registrar@mit.edu', contact: '', faceEnrollId: '', fingerprintStatus: '', mpin: 'bcrypt$12$62637279707424313224376161313437', institutionId: 'inst-mit', institutionName: 'Massachusetts Institute of Technology' },
-      { id: 'usr-stanford', username: 'stanford', password: 'bcrypt$12$62637279707424313224376161313437', role: 'institution', name: 'Stanford Registrar Office', email: 'registrar@stanford.edu', contact: '', faceEnrollId: '', fingerprintStatus: '', mpin: 'bcrypt$12$62637279707424313224376161313437', institutionId: 'inst-stanford', institutionName: 'Stanford University' },
-      { id: 'usr-harvard', username: 'harvard', password: 'bcrypt$12$62637279707424313224376161313437', role: 'institution', name: 'Harvard Registrar Office', email: 'registrar@harvard.edu', contact: '', faceEnrollId: '', fingerprintStatus: '', mpin: 'bcrypt$12$62637279707424313224376161313437', institutionId: 'inst-harvard', institutionName: 'Harvard University' },
-      { id: 'usr-caltech', username: 'caltech', password: 'bcrypt$12$62637279707424313224376161313437', role: 'institution', name: 'Caltech Registrar Office', email: 'registrar@caltech.edu', contact: '', faceEnrollId: '', fingerprintStatus: '', mpin: 'bcrypt$12$62637279707424313224376161313437', institutionId: 'inst-caltech', institutionName: 'California Institute of Technology' },
-      { id: 'usr-oxford', username: 'oxford', password: 'bcrypt$12$62637279707424313224376161313437', role: 'institution', name: 'Oxford Registrar Office', email: 'registrar@ox.ac.uk', contact: '', faceEnrollId: '', fingerprintStatus: '', mpin: 'bcrypt$12$62637279707424313224376161313437', institutionId: 'inst-oxford', institutionName: 'University of Oxford' },
-      { id: 'usr-cambridge', username: 'cambridge', password: 'bcrypt$12$62637279707424313224376161313437', role: 'institution', name: 'Cambridge Registrar Office', email: 'registrar@cam.ac.uk', contact: '', faceEnrollId: '', fingerprintStatus: '', mpin: 'bcrypt$12$62637279707424313224376161313437', institutionId: 'inst-cambridge', institutionName: 'University of Cambridge' },
-      { id: 'usr-student', username: 'student', password: 'bcrypt$12$62637279707424313224376161313437', role: 'student', name: 'Alex Johnson', email: 'alex.j@student.mit.edu', contact: '+1 (555) 012-3810', faceEnrollId: 'face-mock-alex-johnson-2026', fingerprintStatus: 'enrolled', mpin: 'bcrypt$12$62637279707424313224376161313437', institutionId: 'inst-mit', institutionName: 'Massachusetts Institute of Technology', rollNo: 'MIT-2024-082', regNo: 'REG-9923881', department: 'Computer Science', batch: '2024', enrolledAt: '2026-06-21T09:00:00Z' }
+      { id: 'usr-madhan', username: 'madhan', password: hash('password123'), role: 'admin', name: 'Mr. MADHAN', email: 'madhan@aegiscert.gov', contact: '+1 (555) 019-8822', faceEnrollId: '', fingerprintStatus: 'pending', mpin: '', mustResetPassword: 1 },
+      { id: 'usr-honeytoken-1', username: 'backup_root', password: hash('locked_root_bypass_trap_9918'), role: 'admin', name: 'Backup System Root Daemon', email: 'honeypot.root@aegiscert.gov', contact: '', faceEnrollId: '', fingerprintStatus: '', mpin: '', mustResetPassword: 1 },
+      { id: 'usr-honeytoken-2', username: 'database_root', password: hash('locked_database_bypass_trap_1029'), role: 'admin', name: 'Database Administrator Daemon', email: 'honeypot.db@aegiscert.gov', contact: '', faceEnrollId: '', fingerprintStatus: '', mpin: '', mustResetPassword: 1 },
+      { id: 'usr-mit', username: 'mit', password: hash('password123'), role: 'institution', name: 'MIT Registrar Office', email: 'registrar@mit.edu', contact: '', faceEnrollId: '', fingerprintStatus: '', mpin: hash('123456'), institutionId: 'inst-mit', institutionName: 'Massachusetts Institute of Technology', mustResetPassword: 1 },
+      { id: 'usr-stanford', username: 'stanford', password: hash('password123'), role: 'institution', name: 'Stanford Registrar Office', email: 'registrar@stanford.edu', contact: '', faceEnrollId: '', fingerprintStatus: '', mpin: hash('123456'), institutionId: 'inst-stanford', institutionName: 'Stanford University', mustResetPassword: 1 },
+      { id: 'usr-harvard', username: 'harvard', password: hash('password123'), role: 'institution', name: 'Harvard Registrar Office', email: 'registrar@harvard.edu', contact: '', faceEnrollId: '', fingerprintStatus: '', mpin: hash('123456'), institutionId: 'inst-harvard', institutionName: 'Harvard University', mustResetPassword: 1 },
+      { id: 'usr-caltech', username: 'caltech', password: hash('password123'), role: 'institution', name: 'Caltech Registrar Office', email: 'registrar@caltech.edu', contact: '', faceEnrollId: '', fingerprintStatus: '', mpin: hash('123456'), institutionId: 'inst-caltech', institutionName: 'California Institute of Technology', mustResetPassword: 1 },
+      { id: 'usr-oxford', username: 'oxford', password: hash('password123'), role: 'institution', name: 'Oxford Registrar Office', email: 'registrar@ox.ac.uk', contact: '', faceEnrollId: '', fingerprintStatus: '', mpin: hash('123456'), institutionId: 'inst-oxford', institutionName: 'University of Oxford', mustResetPassword: 1 },
+      { id: 'usr-cambridge', username: 'cambridge', password: hash('password123'), role: 'institution', name: 'Cambridge Registrar Office', email: 'registrar@cam.ac.uk', contact: '', faceEnrollId: '', fingerprintStatus: '', mpin: hash('123456'), institutionId: 'inst-cambridge', institutionName: 'University of Cambridge', mustResetPassword: 1 },
+      { id: 'usr-student', username: 'student', password: hash('password123'), role: 'student', name: 'Alex Johnson', email: 'alex.j@student.mit.edu', contact: '+1 (555) 012-3810', faceEnrollId: 'face-mock-alex-johnson-2026', fingerprintStatus: 'enrolled', mpin: hash('123456'), institutionId: 'inst-mit', institutionName: 'Massachusetts Institute of Technology', rollNo: 'MIT-2024-082', regNo: 'REG-9923881', department: 'Computer Science', batch: '2024', enrolledAt: '2026-06-21T09:00:00Z', mustResetPassword: 1 }
     ];
     for (const u of defaultUsers) {
       await db.run(
-        `INSERT INTO users (id, username, password, role, name, email, contact, faceEnrollId, fingerprintStatus, mpin, institutionId, institutionName, rollNo, regNo, department, batch, enrolledAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [u.id, u.username, u.password, u.role, u.name, u.email, u.contact || '', u.faceEnrollId || '', u.fingerprintStatus || '', u.mpin || '', u.institutionId || '', u.institutionName || '', u.rollNo || '', u.regNo || '', u.department || '', u.batch || '', u.enrolledAt || '']
+        `INSERT INTO users (id, username, password, role, name, email, contact, faceEnrollId, fingerprintStatus, mpin, institutionId, institutionName, rollNo, regNo, department, batch, enrolledAt, mustResetPassword) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [u.id, u.username, u.password, u.role, u.name, u.email, u.contact || '', u.faceEnrollId || '', u.fingerprintStatus || '', u.mpin || '', u.institutionId || '', u.institutionName || '', u.rollNo || '', u.regNo || '', u.department || '', u.batch || '', u.enrolledAt || '', u.mustResetPassword]
       );
     }
   }

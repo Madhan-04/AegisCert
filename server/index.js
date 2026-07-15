@@ -1,86 +1,406 @@
 import express from 'express';
 import cors from 'cors';
+import { z } from 'zod';
 import { initializeDatabase, getDbConnection } from './db.js';
+import { comparePassword, hashPassword, generateToken, authenticateToken, requireRoles } from './auth.js';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors());
+if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
+  console.error("FATAL INITIALIZATION ERROR: JWT_SECRET environment variable is missing in production mode!");
+  process.exit(1);
+}
+
+// CORS Security Setup
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+  : ['http://localhost:5173', 'http://localhost:5000'];
+
+app.use(cors({
+  origin: function(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Blocked by CORS policy'));
+    }
+  },
+  methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
+
 app.use(express.json({ limit: '50mb' }));
 
-// Initialize SQLite tables & seeds on startup
+// Initialize SQLite database
 initializeDatabase().catch(err => {
   console.error('Failed to initialize SQLite database:', err);
 });
 
-// Single-fetch synchronization API to load database state into memory cache
-app.get('/api/initialize', async (req, res) => {
+// Zod schemas for table writes
+const schemas = {
+  users: z.object({
+    id: z.string(),
+    username: z.string(),
+    password: z.string().optional(),
+    role: z.enum(['admin', 'institution', 'student', 'verifier']),
+    name: z.string(),
+    email: z.string(),
+    contact: z.string().optional().nullable(),
+    faceEnrollId: z.string().optional().nullable(),
+    fingerprintStatus: z.string().optional().nullable(),
+    mpin: z.string().optional().nullable(),
+    institutionId: z.string().optional().nullable(),
+    institutionName: z.string().optional().nullable(),
+    rollNo: z.string().optional().nullable(),
+    regNo: z.string().optional().nullable(),
+    department: z.string().optional().nullable(),
+    batch: z.string().optional().nullable(),
+    enrolledAt: z.string().optional().nullable(),
+    mustResetPassword: z.number().optional()
+  }),
+  institutions: z.object({
+    id: z.string(),
+    name: z.string(),
+    regNo: z.string(),
+    email: z.string().optional().nullable(),
+    status: z.enum(['pending', 'approved', 'rejected']),
+    createdAt: z.string().optional().nullable(),
+    logoUrl: z.string().optional().nullable(),
+    primaryColor: z.string().optional().nullable(),
+    secondaryColor: z.string().optional().nullable(),
+    campusCount: z.number().optional().nullable(),
+    departmentCount: z.number().optional().nullable()
+  }),
+  certificates: z.object({
+    id: z.string(),
+    studentName: z.string(),
+    rollNo: z.string(),
+    regNo: z.string(),
+    degree: z.string(),
+    department: z.string(),
+    cgpa: z.number(),
+    institutionId: z.string(),
+    institutionName: z.string(),
+    issueDate: z.string().optional().nullable(),
+    blockchainHash: z.string(),
+    signature: z.string(),
+    status: z.enum(['draft', 'pending', 'issued', 'active', 'suspended', 'revoked', 'expired']),
+    statusHistory: z.array(z.any()).optional().nullable().or(z.string()),
+    dob: z.string().optional().nullable(),
+    yearOfPassout: z.string().optional().nullable(),
+    pdfMarksheet: z.string().optional().nullable()
+  }),
+  campuses: z.object({
+    id: z.string(),
+    institutionId: z.string(),
+    name: z.string(),
+    location: z.string().optional().nullable(),
+    campusDean: z.string().optional().nullable(),
+    status: z.string().optional().nullable(),
+    activeStudentCount: z.number().optional().nullable()
+  }),
+  departments: z.object({
+    id: z.string(),
+    institutionId: z.string(),
+    name: z.string(),
+    code: z.string().optional().nullable(),
+    headOfDept: z.string().optional().nullable(),
+    status: z.string().optional().nullable(),
+    courseCount: z.number().optional().nullable()
+  }),
+  api_keys: z.object({
+    id: z.string(),
+    name: z.string(),
+    apiKey: z.string(),
+    environment: z.string().optional().nullable(),
+    status: z.enum(['active', 'revoked']),
+    rateLimit: z.number().optional().nullable(),
+    requestsToday: z.number().optional().nullable(),
+    createdAt: z.string().optional().nullable(),
+    lastUsedAt: z.string().optional().nullable()
+  }),
+  audit_logs: z.object({
+    id: z.string(),
+    userId: z.string(),
+    userName: z.string(),
+    userRole: z.string(),
+    action: z.string(),
+    details: z.string().optional().nullable(),
+    status: z.enum(['success', 'failure']),
+    timestamp: z.string()
+  }),
+  soc_events: z.object({
+    id: z.string(),
+    type: z.string().optional().nullable(),
+    severity: z.enum(['critical', 'high', 'medium', 'low']),
+    message: z.string(),
+    timestamp: z.string(),
+    status: z.string().optional().nullable(),
+    source: z.string().optional().nullable()
+  })
+};
+
+// ----------------------------------------------------
+// AUTH ROUTES
+// ----------------------------------------------------
+
+/**
+ * Real password validation + JWT issuance
+ */
+app.post('/api/auth/login', async (req, res) => {
+  const { username, password, role } = req.body;
+  
+  if (!username || !password || !role) {
+    return res.status(400).json({ error: 'Username, password, and role are required.' });
+  }
+
   const db = await getDbConnection();
   try {
-    const users = await db.all('SELECT * FROM users');
-    const institutions = await db.all('SELECT * FROM institutions');
+    const user = await db.get('SELECT * FROM users WHERE LOWER(username) = ? AND role = ?', [username.toLowerCase(), role]);
     
-    const rawCerts = await db.all('SELECT * FROM certificates');
-    const certificates = rawCerts.map(c => ({
-      ...c,
-      statusHistory: c.statusHistory ? JSON.parse(c.statusHistory) : []
-    }));
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid credentials.' });
+    }
 
-    const auditLogs = await db.all('SELECT * FROM audit_logs');
-    const socEvents = await db.all('SELECT * FROM soc_events');
-    const loginHistory = await db.all('SELECT * FROM login_history');
-    const activeSessions = await db.all('SELECT * FROM active_sessions');
+    // Verify Password
+    const passwordMatch = await comparePassword(password, user.password);
+    if (!passwordMatch) {
+      return res.status(401).json({ error: 'Invalid credentials.' });
+    }
+
+    const token = generateToken({
+      id: user.id,
+      username: user.username,
+      role: user.role,
+      institutionId: user.institutionId
+    });
+
+    const userResponse = { ...user };
+    delete userResponse.password; // strip password hash from response
+
+    res.json({
+      success: true,
+      token,
+      user: userResponse,
+      mustResetPassword: user.mustResetPassword === 1
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    await db.close();
+  }
+});
+
+/**
+ * Password change / force reset endpoint
+ */
+app.post('/api/auth/reset-password', async (req, res) => {
+  const { username, role, newPassword } = req.body;
+  if (!username || !role || !newPassword) {
+    return res.status(400).json({ error: 'Username, role, and newPassword are required.' });
+  }
+
+  const db = await getDbConnection();
+  try {
+    const user = await db.get('SELECT * FROM users WHERE LOWER(username) = ? AND role = ?', [username.toLowerCase(), role]);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+
+    const hashed = await hashPassword(newPassword);
+    await db.run('UPDATE users SET password = ?, mustResetPassword = 0 WHERE id = ?', [hashed, user.id]);
     
-    const rawSettings = await db.all('SELECT * FROM settings');
+    res.json({ success: true, message: 'Password updated successfully.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    await db.close();
+  }
+});
+
+/**
+ * Verify MPIN endpoint (authenticated)
+ */
+app.post('/api/auth/verify-mpin', authenticateToken, async (req, res) => {
+  const { mpin } = req.body;
+  if (!mpin) return res.status(400).json({ error: 'MPIN code is required.' });
+
+  const db = await getDbConnection();
+  try {
+    const user = await db.get('SELECT mpin FROM users WHERE id = ?', [req.user.id]);
+    if (!user || !user.mpin) return res.status(400).json({ error: 'MPIN not enrolled.' });
+
+    const match = await comparePassword(mpin, user.mpin);
+    if (match) {
+      res.json({ success: true });
+    } else {
+      res.status(401).json({ error: 'Invalid MPIN verification code.' });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    await db.close();
+  }
+});
+
+/**
+ * Enroll/Setup MPIN endpoint (authenticated)
+ */
+app.post('/api/auth/setup-mpin', authenticateToken, async (req, res) => {
+  const { mpin } = req.body;
+  if (!mpin || mpin.length !== 6) return res.status(400).json({ error: 'Valid 6-digit MPIN is required.' });
+
+  const db = await getDbConnection();
+  try {
+    const hashed = await hashPassword(mpin);
+    await db.run('UPDATE users SET mpin = ? WHERE id = ?', [hashed, req.user.id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    await db.close();
+  }
+});
+
+// ----------------------------------------------------
+// INITIALIZE DATABASE ENDPOINT
+// ----------------------------------------------------
+
+/**
+ * Returns database state filtered by JWT context (multi-tenant isolation)
+ */
+app.get('/api/initialize', authenticateToken, async (req, res) => {
+  const { role, institutionId, id: userId } = req.user;
+  const db = await getDbConnection();
+
+  try {
+    // 1. Help articles, FAQs, guides, setting metadata are accessible to everyone
+    const settingsRaw = await db.all('SELECT * FROM settings');
     const settings = {};
-    rawSettings.forEach(s => {
+    settingsRaw.forEach(s => {
       if (s.value === 'true') settings[s.key] = true;
       else if (s.value === 'false') settings[s.key] = false;
       else settings[s.key] = s.value;
     });
 
-    const campuses = await db.all('SELECT * FROM campuses');
-    const departments = await db.all('SELECT * FROM departments');
-    const apiKeys = await db.all('SELECT * FROM api_keys');
-    const apiLogs = await db.all('SELECT * FROM api_logs');
-    
-    const rawOcr = await db.all('SELECT * FROM ocr_reports');
-    const ocrReports = rawOcr.map(r => ({
-      ...r,
-      detailedAnalyses: r.detailedAnalyses ? JSON.parse(r.detailedAnalyses) : {}
-    }));
-
-    const backupSnapshots = await db.all('SELECT * FROM backup_snapshots');
-    const recoveryLogs = await db.all('SELECT * FROM recovery_logs');
-    const deviceRegistrations = await db.all('SELECT * FROM device_registrations');
-    const notifications = await db.all('SELECT * FROM notifications');
-    
-    const rawHelp = await db.all('SELECT * FROM help_articles');
-    const helpArticles = rawHelp.map(a => ({
+    const helpArticlesRaw = await db.all('SELECT * FROM help_articles');
+    const helpArticles = helpArticlesRaw.map(a => ({
       ...a,
       keywords: a.keywords ? JSON.parse(a.keywords) : [],
       relatedRoutes: a.relatedRoutes ? JSON.parse(a.relatedRoutes) : []
     }));
 
     const faqs = await db.all('SELECT * FROM faqs');
-
-    const rawSupport = await db.all('SELECT * FROM support_tickets');
-    const supportTickets = rawSupport.map(t => ({
-      ...t,
-      replies: t.replies ? JSON.parse(t.replies) : []
-    }));
-
-    const feedback = await db.all('SELECT * FROM feedback');
     const troubleshootingGuides = await db.all('SELECT * FROM troubleshooting_guides');
-    const recentSearches = await db.all('SELECT * FROM recent_searches');
 
-    const rawBlocks = await db.all('SELECT * FROM blockchain_ledger');
-    const blockchainLedger = rawBlocks.map(b => ({
-      ...b,
-      transactions: b.transactions ? JSON.parse(b.transactions) : []
-    }));
+    // 2. Fetch resources with multi-tenant filtering applied
+    let users = [];
+    let institutions = [];
+    let certificates = [];
+    let auditLogs = [];
+    let socEvents = [];
+    let loginHistory = [];
+    let activeSessions = [];
+    let campuses = [];
+    let departments = [];
+    let apiKeys = [];
+    let apiLogs = [];
+    let ocrReports = [];
+    let backupSnapshots = [];
+    let recoveryLogs = [];
+    let deviceRegistrations = [];
+    let notifications = [];
+    let feedback = [];
+    let recentSearches = [];
+    let blockchainLedger = [];
 
-    await db.close();
+    if (role === 'admin') {
+      // Super Admin sees all data
+      users = await db.all('SELECT * FROM users');
+      institutions = await db.all('SELECT * FROM institutions');
+      const certsRaw = await db.all('SELECT * FROM certificates');
+      certificates = certsRaw.map(c => ({ ...c, statusHistory: c.statusHistory ? JSON.parse(c.statusHistory) : [] }));
+      auditLogs = await db.all('SELECT * FROM audit_logs');
+      socEvents = await db.all('SELECT * FROM soc_events');
+      loginHistory = await db.all('SELECT * FROM login_history');
+      activeSessions = await db.all('SELECT * FROM active_sessions');
+      campuses = await db.all('SELECT * FROM campuses');
+      departments = await db.all('SELECT * FROM departments');
+      apiKeys = await db.all('SELECT * FROM api_keys');
+      apiLogs = await db.all('SELECT * FROM api_logs');
+      const ocrRaw = await db.all('SELECT * FROM ocr_reports');
+      ocrReports = ocrRaw.map(r => ({ ...r, detailedAnalyses: r.detailedAnalyses ? JSON.parse(r.detailedAnalyses) : {} }));
+      backupSnapshots = await db.all('SELECT * FROM backup_snapshots');
+      recoveryLogs = await db.all('SELECT * FROM recovery_logs');
+      deviceRegistrations = await db.all('SELECT * FROM device_registrations');
+      notifications = await db.all('SELECT * FROM notifications');
+      feedback = await db.all('SELECT * FROM feedback');
+      recentSearches = await db.all('SELECT * FROM recent_searches');
+      const blocksRaw = await db.all('SELECT * FROM blockchain_ledger');
+      blockchainLedger = blocksRaw.map(b => ({ ...b, transactions: b.transactions ? JSON.parse(b.transactions) : [] }));
+    } else if (role === 'institution') {
+      // Institution Admins see scoped data
+      users = await db.all('SELECT * FROM users WHERE institutionId = ? OR role = "verifier"', [institutionId]);
+      institutions = await db.all('SELECT * FROM institutions WHERE id = ?', [institutionId]);
+      
+      const certsRaw = await db.all('SELECT * FROM certificates WHERE institutionId = ?', [institutionId]);
+      certificates = certsRaw.map(c => ({ ...c, statusHistory: c.statusHistory ? JSON.parse(c.statusHistory) : [] }));
+      
+      auditLogs = await db.all('SELECT * FROM audit_logs WHERE userId = ? OR userRole = "verifier"', [userId]);
+      socEvents = await db.all('SELECT * FROM soc_events WHERE severity = "low" OR severity = "medium"');
+      loginHistory = await db.all('SELECT * FROM login_history WHERE userId = ?', [userId]);
+      activeSessions = await db.all('SELECT * FROM active_sessions WHERE userId = ?', [userId]);
+      campuses = await db.all('SELECT * FROM campuses WHERE institutionId = ?', [institutionId]);
+      departments = await db.all('SELECT * FROM departments WHERE institutionId = ?', [institutionId]);
+      apiKeys = await db.all('SELECT * FROM api_keys');
+      apiLogs = await db.all('SELECT * FROM api_logs');
+      
+      const ocrRaw = await db.all('SELECT * FROM ocr_reports');
+      ocrReports = ocrRaw.map(r => ({ ...r, detailedAnalyses: r.detailedAnalyses ? JSON.parse(r.detailedAnalyses) : {} }));
+      
+      backupSnapshots = await db.all('SELECT * FROM backup_snapshots');
+      recoveryLogs = await db.all('SELECT * FROM recovery_logs');
+      deviceRegistrations = await db.all('SELECT * FROM device_registrations');
+      notifications = await db.all('SELECT * FROM notifications WHERE audience = "institution" OR audience = "all"');
+      feedback = await db.all('SELECT * FROM feedback WHERE userId = ?', [userId]);
+      recentSearches = await db.all('SELECT * FROM recent_searches WHERE userId = ?', [userId]);
+      
+      const blocksRaw = await db.all('SELECT * FROM blockchain_ledger');
+      blockchainLedger = blocksRaw.map(b => ({ ...b, transactions: b.transactions ? JSON.parse(b.transactions) : [] }));
+    } else if (role === 'student') {
+      // Students see only their own accounts and documents
+      users = await db.all('SELECT * FROM users WHERE id = ?', [userId]);
+      institutions = await db.all('SELECT * FROM institutions WHERE id = ?', [institutionId]);
+      
+      const userRec = users[0];
+      if (userRec) {
+        const certsRaw = await db.all('SELECT * FROM certificates WHERE rollNo = ? OR regNo = ?', [userRec.rollNo, userRec.regNo]);
+        certificates = certsRaw.map(c => ({ ...c, statusHistory: c.statusHistory ? JSON.parse(c.statusHistory) : [] }));
+      }
+      
+      auditLogs = await db.all('SELECT * FROM audit_logs WHERE userId = ?', [userId]);
+      loginHistory = await db.all('SELECT * FROM login_history WHERE userId = ?', [userId]);
+      activeSessions = await db.all('SELECT * FROM active_sessions WHERE userId = ?', [userId]);
+      notifications = await db.all('SELECT * FROM notifications WHERE userId = ? OR audience = "student" OR audience = "all"', [userId]);
+      deviceRegistrations = await db.all('SELECT * FROM device_registrations WHERE userId = ?', [userId]);
+      feedback = await db.all('SELECT * FROM feedback WHERE userId = ?', [userId]);
+      recentSearches = await db.all('SELECT * FROM recent_searches WHERE userId = ?', [userId]);
+      
+      const blocksRaw = await db.all('SELECT * FROM blockchain_ledger');
+      blockchainLedger = blocksRaw.map(b => ({ ...b, transactions: b.transactions ? JSON.parse(b.transactions) : [] }));
+    } else {
+      // Verifier
+      users = await db.all('SELECT * FROM users WHERE id = ?', [userId]);
+      const certsRaw = await db.all('SELECT * FROM certificates WHERE status = "active"');
+      certificates = certsRaw.map(c => ({ ...c, statusHistory: c.statusHistory ? JSON.parse(c.statusHistory) : [] }));
+      notifications = await db.all('SELECT * FROM notifications WHERE audience = "all"');
+      recentSearches = await db.all('SELECT * FROM recent_searches WHERE userId = ?', [userId]);
+      
+      const blocksRaw = await db.all('SELECT * FROM blockchain_ledger');
+      blockchainLedger = blocksRaw.map(b => ({ ...b, transactions: b.transactions ? JSON.parse(b.transactions) : [] }));
+    }
+
     res.json({
       success: true,
       users,
@@ -102,7 +422,7 @@ app.get('/api/initialize', async (req, res) => {
       notifications,
       helpArticles,
       faqs,
-      supportTickets,
+      supportTickets: [],
       feedback,
       troubleshootingGuides,
       recentSearches,
@@ -110,218 +430,209 @@ app.get('/api/initialize', async (req, res) => {
     });
   } catch (error) {
     console.error('Initialization error:', error);
-    try { await db.close(); } catch (e) {}
     res.status(500).json({ error: error.message });
+  } finally {
+    await db.close();
   }
 });
 
-// Sync endpoint to write arrays back to specific SQLite tables
-app.post('/api/sync', async (req, res) => {
-  const { table, data } = req.body;
+// ----------------------------------------------------
+// GENERIC CRUD API GATEWAY & VALIDATION
+// ----------------------------------------------------
+
+/**
+ * POST - Create a resource (authenticated, validated)
+ */
+app.post('/api/resources/:table', authenticateToken, async (req, res) => {
+  const { table } = req.params;
   const db = await getDbConnection();
+
   try {
+    const schema = schemas[table];
+    if (!schema) {
+      return res.status(400).json({ error: `Unsupported table or resource type: ${table}` });
+    }
+
+    // Parse and Validate payload shape with Zod
+    const validatedBody = schema.parse(req.body);
+
+    // Intercept user creations to hash password and mpin server-side
     if (table === 'users') {
-      await db.run('DELETE FROM users');
-      for (const u of data) {
-        await db.run(
-          `INSERT INTO users (id, username, password, role, name, email, contact, faceEnrollId, fingerprintStatus, mpin, institutionId, institutionName, rollNo, regNo, department, batch, enrolledAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [u.id, u.username, u.password, u.role, u.name, u.email, u.contact || '', u.faceEnrollId || '', u.fingerprintStatus || '', u.mpin || '', u.institutionId || '', u.institutionName || '', u.rollNo || '', u.regNo || '', u.department || '', u.batch || '', u.enrolledAt || '']
-        );
+      if (validatedBody.password) {
+        validatedBody.password = await hashPassword(validatedBody.password);
       }
-    } else if (table === 'institutions') {
-      await db.run('DELETE FROM institutions');
-      for (const inst of data) {
-        await db.run(
-          `INSERT INTO institutions (id, name, regNo, email, status, createdAt, logoUrl, primaryColor, secondaryColor, campusCount, departmentCount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [inst.id, inst.name, inst.regNo, inst.email, inst.status, inst.createdAt, inst.logoUrl, inst.primaryColor, inst.secondaryColor, inst.campusCount, inst.departmentCount]
-        );
-      }
-    } else if (table === 'certificates') {
-      await db.run('DELETE FROM certificates');
-      for (const c of data) {
-        await db.run(
-          `INSERT INTO certificates (id, studentName, rollNo, regNo, degree, department, cgpa, institutionId, institutionName, issueDate, blockchainHash, signature, status, statusHistory, dob, yearOfPassout, pdfMarksheet) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [c.id, c.studentName, c.rollNo, c.regNo, c.degree, c.department, c.cgpa, c.institutionId, c.institutionName, c.issueDate, c.blockchainHash, c.signature, c.status, JSON.stringify(c.statusHistory), c.dob, c.yearOfPassout, c.pdfMarksheet]
-        );
-      }
-    } else if (table === 'auditLogs') {
-      await db.run('DELETE FROM audit_logs');
-      for (const l of data) {
-        await db.run(
-          `INSERT INTO audit_logs (id, userId, userName, userRole, action, details, status, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [l.id, l.userId, l.userName, l.userRole, l.action, l.details, l.status, l.timestamp]
-        );
-      }
-    } else if (table === 'socEvents') {
-      await db.run('DELETE FROM soc_events');
-      for (const e of data) {
-        await db.run(
-          `INSERT INTO soc_events (id, type, severity, message, timestamp, status, source) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [e.id, e.type, e.severity, e.message, e.timestamp, e.status, e.source]
-        );
-      }
-    } else if (table === 'loginHistory') {
-      await db.run('DELETE FROM login_history');
-      for (const h of data) {
-        await db.run(
-          `INSERT INTO login_history (id, userId, username, timestamp, ipAddress, deviceType, status) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [h.id, h.userId, h.username, h.timestamp, h.ipAddress, h.deviceType, h.status]
-        );
-      }
-    } else if (table === 'activeSessions') {
-      await db.run('DELETE FROM active_sessions');
-      for (const s of data) {
-        await db.run(
-          `INSERT INTO active_sessions (id, userId, userName, userRole, device, ipAddress, loginTime, lastActive) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [s.id, s.userId, s.userName, s.userRole, s.device, s.ipAddress, s.loginTime, s.lastActive]
-        );
-      }
-    } else if (table === 'settings') {
-      await db.run('DELETE FROM settings');
-      for (const key of Object.keys(data)) {
-        await db.run(
-          `INSERT INTO settings (key, value) VALUES (?, ?)`,
-          [key, data[key].toString()]
-        );
-      }
-    } else if (table === 'campuses') {
-      await db.run('DELETE FROM campuses');
-      for (const c of data) {
-        await db.run(
-          `INSERT INTO campuses (id, institutionId, name, location, campusDean, status, activeStudentCount) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [c.id, c.institutionId, c.name, c.location, c.campusDean, c.status, c.activeStudentCount]
-        );
-      }
-    } else if (table === 'departments') {
-      await db.run('DELETE FROM departments');
-      for (const d of data) {
-        await db.run(
-          `INSERT INTO departments (id, institutionId, name, code, headOfDept, status, courseCount) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [d.id, d.institutionId, d.name, d.code, d.headOfDept, d.status, d.courseCount]
-        );
-      }
-    } else if (table === 'apiKeys') {
-      await db.run('DELETE FROM api_keys');
-      for (const k of data) {
-        await db.run(
-          `INSERT INTO api_keys (id, name, apiKey, environment, status, rateLimit, requestsToday, createdAt, lastUsedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [k.id, k.name, k.apiKey, k.environment, k.status, k.rateLimit, k.requestsToday, k.createdAt, k.lastUsedAt]
-        );
-      }
-    } else if (table === 'apiLogs') {
-      await db.run('DELETE FROM api_logs');
-      for (const l of data) {
-        await db.run(
-          `INSERT INTO api_logs (id, timestamp, path, method, statusCode, latency, clientIp, apiKeyName) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [l.id, l.timestamp, l.path, l.method, l.statusCode, l.latency, l.clientIp, l.apiKeyName]
-        );
-      }
-    } else if (table === 'ocrReports') {
-      await db.run('DELETE FROM ocr_reports');
-      for (const r of data) {
-        await db.run(
-          `INSERT INTO ocr_reports (id, timestamp, fileName, fileSize, status, authenticityScore, verifiedAddress, alertsCount, detailedAnalyses) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [r.id, r.timestamp, r.fileName, r.fileSize, r.status, r.authenticityScore, r.verifiedAddress, r.alertsCount, JSON.stringify(r.detailedAnalyses)]
-        );
-      }
-    } else if (table === 'backupSnapshots') {
-      await db.run('DELETE FROM backup_snapshots');
-      for (const s of data) {
-        await db.run(
-          `INSERT INTO backup_snapshots (id, timestamp, type, size, blockHeight, transactionCount, checksum, status, hashIntegrity) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [s.id, s.timestamp, s.type, s.size, s.blockHeight, s.transactionCount, s.checksum, s.status, s.hashIntegrity]
-        );
-      }
-    } else if (table === 'recoveryLogs') {
-      await db.run('DELETE FROM recovery_logs');
-      for (const l of data) {
-        await db.run(
-          `INSERT INTO recovery_logs (id, timestamp, type, snapshotId, status, details, operator, hashCheck) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [l.id, l.timestamp, l.type, l.snapshotId, l.status, l.details, l.operator, l.hashCheck]
-        );
-      }
-    } else if (table === 'deviceRegistrations') {
-      await db.run('DELETE FROM device_registrations');
-      for (const r of data) {
-        await db.run(
-          `INSERT INTO device_registrations (id, userId, deviceName, type, status, ipAddress, enrolledAt, lastActivity) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [r.id, r.userId, r.deviceName, r.type, r.status, r.ipAddress, r.enrolledAt, r.lastActivity]
-        );
-      }
-    } else if (table === 'notifications') {
-      await db.run('DELETE FROM notifications');
-      for (const n of data) {
-        await db.run(
-          `INSERT INTO notifications (id, timestamp, type, title, message, read, severity, audience) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [n.id, n.timestamp, n.type, n.title, n.message, n.read ? 1 : 0, n.severity, n.audience]
-        );
-      }
-    } else if (table === 'helpArticles') {
-      await db.run('DELETE FROM help_articles');
-      for (const a of data) {
-        await db.run(
-          `INSERT INTO help_articles (id, category, title, body, keywords, relatedRoutes) VALUES (?, ?, ?, ?, ?, ?)`,
-          [a.id, a.category, a.title, a.body, JSON.stringify(a.keywords), JSON.stringify(a.relatedRoutes)]
-        );
-      }
-    } else if (table === 'faqs') {
-      await db.run('DELETE FROM faqs');
-      for (const f of data) {
-        await db.run(
-          `INSERT INTO faqs (id, question, answer, category) VALUES (?, ?, ?, ?)`,
-          [f.id, f.question, f.answer, f.category]
-        );
-      }
-    } else if (table === 'supportTickets') {
-      await db.run('DELETE FROM support_tickets');
-      for (const t of data) {
-        await db.run(
-          `INSERT INTO support_tickets (id, userId, userName, userRole, category, subject, message, status, timestamp, replies) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [t.id, t.userId, t.userName, t.userRole, t.category, t.subject, t.message, t.status, t.timestamp, JSON.stringify(t.replies)]
-        );
-      }
-    } else if (table === 'feedback') {
-      await db.run('DELETE FROM feedback');
-      for (const f of data) {
-        await db.run(
-          `INSERT INTO feedback (id, userId, userName, type, title, description, timestamp, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [f.id, f.userId, f.userName, f.type, f.title, f.description, f.timestamp, f.status]
-        );
-      }
-    } else if (table === 'troubleshootingGuides') {
-      await db.run('DELETE FROM troubleshooting_guides');
-      for (const g of data) {
-        await db.run(
-          `INSERT INTO troubleshooting_guides (id, problem, reason, resolution, recommendedAction) VALUES (?, ?, ?, ?, ?)`,
-          [g.id, g.problem, g.reason, g.resolution, g.recommendedAction]
-        );
-      }
-    } else if (table === 'recentSearches') {
-      await db.run('DELETE FROM recent_searches');
-      for (const s of data) {
-        await db.run(
-          `INSERT INTO recent_searches (id, userId, query, timestamp) VALUES (?, ?, ?, ?)`,
-          [s.id, s.userId, s.query, s.timestamp]
-        );
-      }
-    } else if (table === 'blockchainLedger') {
-      await db.run('DELETE FROM blockchain_ledger');
-      for (const b of data) {
-        await db.run(
-          `INSERT INTO blockchain_ledger (number, hash, parentHash, timestamp, transactions, nonce, difficulty, gasUsed, gasLimit, miner) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [b.number, b.hash, b.parentHash, b.timestamp, JSON.stringify(b.transactions), b.nonce, b.difficulty, b.gasUsed, b.gasLimit, b.miner]
-        );
+      if (validatedBody.mpin) {
+        validatedBody.mpin = await hashPassword(validatedBody.mpin);
       }
     }
-    await db.close();
+
+    // Multi-tenant write auth checks
+    if (req.user.role === 'institution') {
+      if (validatedBody.institutionId && validatedBody.institutionId !== req.user.institutionId) {
+        return res.status(403).json({ error: 'Tenant isolation violation: cannot write records for other institutions.' });
+      }
+    } else if (req.user.role !== 'admin') {
+      // Students/verifiers cannot write to structural collections
+      if (['users', 'institutions', 'certificates', 'campuses', 'departments', 'api_keys'].includes(table)) {
+        return res.status(403).json({ error: 'Unauthorized write action.' });
+      }
+    }
+
+    // Special fields parsing (JSON format strings)
+    const keys = Object.keys(validatedBody);
+    const columns = keys.join(', ');
+    const placeholders = keys.map(() => '?').join(', ');
+    const values = keys.map(k => {
+      const val = validatedBody[k];
+      return (typeof val === 'object') ? JSON.stringify(val) : val;
+    });
+
+    const query = `INSERT INTO ${table} (${columns}) VALUES (${placeholders})`;
+    await db.run(query, values);
     res.json({ success: true });
   } catch (error) {
-    console.error(`Sync error on table ${table}:`, error);
-    try { await db.close(); } catch (e) {}
-    res.status(500).json({ error: error.message });
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Malformed request structure.', details: error.errors });
+    } else {
+      res.status(500).json({ error: error.message });
+    }
+  } finally {
+    await db.close();
   }
+});
+
+/**
+ * PATCH - Update a resource (authenticated, validated)
+ */
+app.patch('/api/resources/:table/:id', authenticateToken, async (req, res) => {
+  const { table, id } = req.params;
+  const db = await getDbConnection();
+
+  try {
+    const schema = schemas[table];
+    if (!schema) {
+      return res.status(400).json({ error: `Unsupported table or resource: ${table}` });
+    }
+
+    // Run verification to assert tenant ownership
+    const primaryKey = (table === 'blockchain_ledger') ? 'number' : 'id';
+    const existing = await db.get(`SELECT * FROM ${table} WHERE ${primaryKey} = ?`, [id]);
+    if (!existing) {
+      return res.status(404).json({ error: 'Record not found.' });
+    }
+
+    // Enforce tenant scoping check
+    if (req.user.role === 'institution') {
+      if (existing.institutionId && existing.institutionId !== req.user.institutionId) {
+        return res.status(403).json({ error: 'Tenant isolation violation: unauthorized to modify other institution assets.' });
+      }
+    } else if (req.user.role !== 'admin') {
+      if (existing.userId && existing.userId !== req.user.id) {
+        return res.status(403).json({ error: 'Unauthorized to modify other user resources.' });
+      }
+    }
+
+    // Partial schema parsing
+    const validatedBody = schema.partial().parse(req.body);
+    const keys = Object.keys(validatedBody).filter(k => k !== primaryKey);
+    
+    if (keys.length === 0) {
+      return res.json({ success: true, message: 'No fields to update.' });
+    }
+
+    const setStatement = keys.map(k => `${k} = ?`).join(', ');
+    const values = keys.map(k => {
+      const val = validatedBody[k];
+      return (typeof val === 'object') ? JSON.stringify(val) : val;
+    });
+    values.push(id);
+
+    const query = `UPDATE ${table} SET ${setStatement} WHERE ${primaryKey} = ?`;
+    await db.run(query, values);
+    res.json({ success: true });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Malformed request validation.', details: error.errors });
+    } else {
+      res.status(500).json({ error: error.message });
+    }
+  } finally {
+    await db.close();
+  }
+});
+
+/**
+ * DELETE - Delete a resource (authenticated)
+ */
+app.delete('/api/resources/:table/:id', authenticateToken, async (req, res) => {
+  const { table, id } = req.params;
+  const db = await getDbConnection();
+
+  try {
+    const primaryKey = (table === 'blockchain_ledger') ? 'number' : 'id';
+    const existing = await db.get(`SELECT * FROM ${table} WHERE ${primaryKey} = ?`, [id]);
+    if (!existing) {
+      return res.status(404).json({ error: 'Record not found.' });
+    }
+
+    // Scoped permissions validation
+    if (req.user.role === 'institution') {
+      if (existing.institutionId && existing.institutionId !== req.user.institutionId) {
+        return res.status(403).json({ error: 'Access denied: cannot delete other tenant records.' });
+      }
+    } else if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied: structural resource deletion restricted to administrators.' });
+    }
+
+    await db.run(`DELETE FROM ${table} WHERE ${primaryKey} = ?`, [id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    await db.close();
+  }
+});
+
+/**
+ * PUT - Update setting configurations (admin only)
+ */
+app.put('/api/settings', authenticateToken, requireRoles(['admin']), async (req, res) => {
+  const settings = req.body;
+  const db = await getDbConnection();
+  
+  try {
+    await db.run('DELETE FROM settings');
+    for (const key of Object.keys(settings)) {
+      await db.run('INSERT INTO settings (key, value) VALUES (?, ?)', [key, settings[key].toString()]);
+    }
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    await db.close();
+  }
+});
+
+// ----------------------------------------------------
+// DIAGNOSTICS & SYSTEM STATUS
+// ----------------------------------------------------
+
+/**
+ * Security controls dashboard metrics (Issue 10)
+ */
+app.get('/api/security/status', async (req, res) => {
+  const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https';
+  const jwtSecretSet = !!process.env.JWT_SECRET;
+  const allowedOriginsSet = !!process.env.ALLOWED_ORIGINS && process.env.ALLOWED_ORIGINS !== '*';
+  
+  res.json({
+    httpsInUse: isHttps,
+    jwtSecretSet,
+    rlsEnabled: true, // Mock Supabase sandbox layer setting
+    corsRestricted: allowedOriginsSet
+  });
 });
 
 app.listen(PORT, () => {
-  console.log(`AegisCert database server running on http://localhost:${PORT}`);
+  console.log(`AegisCert secure database server running on http://localhost:${PORT}`);
 });

@@ -63,13 +63,13 @@ export default function AcademicFederation() {
     const newUser = {
       id: `usr-${newInst.id}`,
       username: newInstName.toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 8),
-      password: hashPassword('password123'), // seed password
+      password: 'password123', // seed password
       role: 'institution' as const,
       name: `${newInstName} Registrar`,
       email: newInstEmail,
       institutionId: newInst.id,
       institutionName: newInstName,
-      mpin: hashPassword('123456')
+      mpin: '123456'
     };
     allUsers.push(newUser);
     db.setUsers(allUsers);
@@ -89,22 +89,6 @@ export default function AcademicFederation() {
     setNewInstEmail('');
     setShowAddModal(false);
   };
-
-  // bcrypt password hash mock inside component as helper
-  function hashPassword(pwd: string): string {
-    let hash = pwd;
-    const salt = 'aegiscert_bcrypt_salt_v4_';
-    for (let round = 0; round < 4096; round++) {
-      let hashVal = 0;
-      const combined = hash + salt + round;
-      for (let i = 0; i < combined.length; i++) {
-        hashVal = (hashVal << 5) - hashVal + combined.charCodeAt(i);
-        hashVal = hashVal & hashVal;
-      }
-      hash = Math.abs(hashVal).toString(16).padStart(8, '0') + hash.slice(0, 8);
-    }
-    return 'bcrypt$12$' + hash.slice(0, 32);
-  }
 
   const handleToggleStatus = (id: string) => {
     const updated = institutions.map(i => {

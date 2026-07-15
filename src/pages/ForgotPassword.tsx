@@ -14,18 +14,6 @@ export default function ForgotPassword({ navigate }: ForgotPasswordProps) {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [matchedUser, setMatchedUser] = useState<any>(null);
-  
-  // Listen to simulated OTP dispatch to show on screen for developer testing
-  const [otpSentAlert, setOtpSentAlert] = useState<string | null>(null);
-  useEffect(() => {
-    const handleOtpDispatched = (e: Event) => {
-      const data = (e as CustomEvent).detail;
-      setOtpSentAlert(`[SMS GATEWAY SIMULATOR] AegisCert OTP: ${data.code}`);
-      setTimeout(() => setOtpSentAlert(null), 10000);
-    };
-    window.addEventListener('OTP_DISPATCHED', handleOtpDispatched);
-    return () => window.removeEventListener('OTP_DISPATCHED', handleOtpDispatched);
-  }, []);
 
   const handleRequestOTP = (e: React.FormEvent) => {
     e.preventDefault();
@@ -60,7 +48,7 @@ export default function ForgotPassword({ navigate }: ForgotPasswordProps) {
       setStep(3);
       db.addAuditLog(matchedUser.id, matchedUser.name, matchedUser.role, 'PASSWORD_RECOVERY_OTP_VERIFIED', 'OTP successfully verified for password change authorization', 'success');
     } else {
-      setError('Invalid OTP code. Please verify the code displayed in the SMS simulator alert banner.');
+      setError('Invalid OTP code. Please verify the code sent to your device.');
     }
   };
 
@@ -78,32 +66,30 @@ export default function ForgotPassword({ navigate }: ForgotPasswordProps) {
       return;
     }
 
-    // Save update in encrypted database
-    const users = db.getUsers();
-    const updated = users.map(u => {
-      if (u.id === matchedUser.id) {
-        return { ...u, password: hashPassword(newPassword) };
-      }
-      return u;
-    });
+    // Save update in encrypted database and server
+    db.resetPassword(matchedUser.username, matchedUser.role, newPassword).then(success => {
+      if (success) {
+        const users = db.getUsers();
+        const updated = users.map(u => {
+          if (u.id === matchedUser.id) {
+            return { ...u, password: hashPassword(newPassword) };
+          }
+          return u;
+        });
 
-    db.setUsers(updated);
-    db.addAuditLog(matchedUser.id, matchedUser.name, matchedUser.role, 'PASSWORD_RECOVERY_COMPLETE', 'Access password reset complete using OTP verification', 'success');
-    setStep(4);
+        db.setUsers(updated);
+        db.addAuditLog(matchedUser.id, matchedUser.name, matchedUser.role, 'PASSWORD_RECOVERY_COMPLETE', 'Access password reset complete using OTP verification', 'success');
+        setStep(4);
+      } else {
+        setError('Failed to update password on server.');
+      }
+    });
   };
 
   return (
     <div className="min-h-screen relative overflow-hidden bg-darkBg text-slate-100 flex flex-col justify-center items-center px-6 py-12 cyber-grid">
       <div className="glow-orb w-[400px] h-[400px] bg-primary/10 top-[15%] left-[20%]" />
       <div className="glow-orb w-[400px] h-[400px] bg-accent/10 bottom-[15%] right-[20%]" />
-
-      {/* Simulated OTP alerts */}
-      {otpSentAlert && (
-        <div className="fixed top-6 right-6 z-50 p-4 bg-slate-900 border-2 border-indigo-500 rounded-2xl shadow-2xl max-w-sm animate-scaleUp text-xs font-mono text-indigo-300">
-          <p className="font-bold text-white mb-1">📟 SMS OTP DISPATCHER</p>
-          <p>{otpSentAlert}</p>
-        </div>
-      )}
 
       <div className="relative z-10 w-full max-w-md">
         {/* Brand Header */}

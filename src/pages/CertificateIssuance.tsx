@@ -30,6 +30,7 @@ export default function CertificateIssuance({ navigate }: CertificateIssuancePro
   const [miningHash, setMiningHash] = useState('');
   const [newCert, setNewCert] = useState<any>(null);
   const [error, setError] = useState('');
+  const [tempPasswordMsg, setTempPasswordMsg] = useState<string | null>(null);
 
   useEffect(() => {
     const user = db.getCurrentUser();
@@ -70,9 +71,11 @@ export default function CertificateIssuance({ navigate }: CertificateIssuancePro
       const certId = `CERT-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
       const rawMetadata = certId + studentName + rollNo + regNo + dob + yearOfPassout + degree + department + gpaNum.toString();
       
-      // Calculate real SHA-256 hash using synchronized helper
-      const certHash = blockchain.sha256Sync(rawMetadata);
-      const signature = `SIG_0x${Math.random().toString(16).slice(2, 18).toUpperCase()}...${certHash.slice(-8).toUpperCase()}`;
+      // Calculate real SHA-256 hash using async helper
+      const certHash = await blockchain.sha256(rawMetadata);
+      const signatureArray = new Uint32Array(2);
+      crypto.getRandomValues(signatureArray);
+      const signature = `SIG_0x${signatureArray[0].toString(16).toUpperCase()}...${certHash.slice(-8).toUpperCase()}`;
 
       setTimeout(async () => {
         setStep(3);
@@ -125,10 +128,12 @@ export default function CertificateIssuance({ navigate }: CertificateIssuancePro
         const studentExists = allUsers.some(u => u.username === studentUsername || u.rollNo === rollNo);
         
         if (!studentExists) {
+          const tempPassword = crypto.randomUUID().slice(0, 8);
+          setTempPasswordMsg(tempPassword);
           const newStudentUser = {
-            id: `usr-stud-${Math.random().toString(36).substring(2, 9)}`,
+            id: `usr-stud-${crypto.randomUUID().slice(0, 8)}`,
             username: studentUsername,
-            password: hashPassword('password123'), // Default password
+            password: tempPassword,
             role: 'student' as const,
             name: studentName,
             email: `${studentName.toLowerCase().replace(/[^a-z0-9]/g, '')}@student.edu`,
@@ -154,6 +159,8 @@ export default function CertificateIssuance({ navigate }: CertificateIssuancePro
               'success'
             );
           }
+        } else {
+          setTempPasswordMsg(null);
         }
 
         // Add audit logs
@@ -417,6 +424,14 @@ export default function CertificateIssuance({ navigate }: CertificateIssuancePro
               <p className="text-sm text-slate-400">The certificate was successfully compiled and anchored into the blockchain ledger.</p>
             </div>
 
+            {tempPasswordMsg && (
+              <div className="p-4 bg-amber-500/10 border border-amber-500/20 rounded-2xl text-xs text-amber-300 font-sans space-y-1">
+                <span className="font-bold block uppercase tracking-wider text-[10px]">Student Account Auto-Created</span>
+                <p>Temporary Password: <span className="text-white font-mono font-bold select-all bg-slate-900 px-1.5 py-0.5 rounded">{tempPasswordMsg}</span></p>
+                <p className="text-[10px] text-slate-400">The student will be forced to change this password on their first login.</p>
+              </div>
+            )}
+
             {/* Verification Metadata Box */}
             <div className="p-4 bg-slate-950/60 border border-white/5 rounded-2xl text-xs space-y-2.5 font-mono">
               <div className="flex justify-between border-b border-white/5 pb-2 text-slate-500">
@@ -464,6 +479,7 @@ export default function CertificateIssuance({ navigate }: CertificateIssuancePro
                   setYearOfPassout(new Date().getFullYear().toString());
                   setCgpa('');
                   setPdfFileName('');
+                  setTempPasswordMsg(null);
                 }}
                 className="flex-1 py-3 premium-btn-secondary text-sm font-semibold"
               >

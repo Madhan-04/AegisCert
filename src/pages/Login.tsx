@@ -97,8 +97,8 @@ export default function Login({ navigate, onLoginSuccess }: LoginProps) {
   const [isLoading, setIsLoading] = useState(false);
 
   // Authentication Stages:
-  // 'credentials' -> 'mpin_setup' -> 'mpin_entry' -> 'fingerprint' -> 'anchoring_fingerprint'
-  const [loginStage, setLoginStage] = useState<'credentials' | 'mpin_setup' | 'mpin_entry' | 'fingerprint' | 'anchoring_fingerprint'>('credentials');
+  // 'credentials' -> 'mpin_setup' -> 'mpin_entry' -> 'fingerprint' -> 'anchoring_fingerprint' | 'must_reset_password'
+  const [loginStage, setLoginStage] = useState<'credentials' | 'mpin_setup' | 'mpin_entry' | 'fingerprint' | 'anchoring_fingerprint' | 'must_reset_password'>('credentials');
   const [pendingUser, setPendingUser] = useState<User | null>(null);
 
   // Biometric device status (can be toggled in HUD for simulation)
@@ -113,24 +113,27 @@ export default function Login({ navigate, onLoginSuccess }: LoginProps) {
 
   // MPIN Auto-Submit verification
   useEffect(() => {
-    if (loginStage === 'mpin_entry' && mpinInput.length === 6 && pendingUser) {
-      setError('');
-      const hashed = hashPassword(mpinInput);
-      if (pendingUser.mpin === hashed) {
-        if (pendingUser.fingerprintStatus === 'enrolled') {
-          setLoginStage('fingerprint');
-          setScanMessage('MPIN authorized. Place finger on Mantra MFS100 scanner to finalize session.');
+    const verifyMpin = async () => {
+      if (loginStage === 'mpin_entry' && mpinInput.length === 6 && pendingUser) {
+        setError('');
+        const success = await db.verifyMpin(mpinInput);
+        if (success) {
+          if (pendingUser.fingerprintStatus === 'enrolled') {
+            setLoginStage('fingerprint');
+            setScanMessage('MPIN authorized. Place finger on Mantra MFS100 scanner to finalize session.');
+          } else {
+            db.addAuditLog(pendingUser.id, pendingUser.name, pendingUser.role, 'USER_LOGIN_MPIN', 'Successfully authorized login session via Password + 6-digit MPIN', 'success');
+            onLoginSuccess(pendingUser);
+          }
         } else {
-          db.addAuditLog(pendingUser.id, pendingUser.name, pendingUser.role, 'USER_LOGIN_MPIN', 'Successfully authorized login session via Password + 6-digit MPIN', 'success');
-          onLoginSuccess(pendingUser);
+          setError('Invalid 6-digit MPIN. Access Denied.');
+          setMpinInput(''); // Clear input on failure
+          db.addAuditLog(pendingUser.id, pendingUser.name, pendingUser.role, 'MPIN_VERIFICATION_FAILED', 'Incorrect MPIN code verification attempt', 'failure');
+          db.addSocEvent('high', 'MPIN_AUTH_FAIL', `Security Alert: MPIN verification failure on account ${pendingUser.username}`, '127.0.0.1');
         }
-      } else {
-        setError('Invalid 6-digit MPIN. Access Denied.');
-        setMpinInput(''); // Clear input on failure
-        db.addAuditLog(pendingUser.id, pendingUser.name, pendingUser.role, 'MPIN_VERIFICATION_FAILED', 'Incorrect MPIN code verification attempt', 'failure');
-        db.addSocEvent('high', 'MPIN_AUTH_FAIL', `Security Alert: MPIN verification failure on account ${pendingUser.username}`, '127.0.0.1');
       }
-    }
+    };
+    verifyMpin();
   }, [mpinInput, loginStage, pendingUser]);
 
   // Keyboard listener for MPIN
@@ -153,68 +156,46 @@ export default function Login({ navigate, onLoginSuccess }: LoginProps) {
   }, [loginStage]);
 
   // Submit Password credentials
-  const handleCredentialsSubmit = (e: React.FormEvent) => {
+  const handleCredentialsSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setIsLoading(true);
 
-    setTimeout(() => {
-      // 1. Check Emergency Kill Switch Status
-      const settings = db.getSettings();
-      if (settings.killSwitchActive) {
-        setIsLoading(false);
-        setError('Emergency Lockout Active: System operations are frozen by administrative mandate.');
-        db.addSocEvent('critical', 'LOGIN_BLOCKED_FREEZE', `Login attempt on account ${username} blocked due to active Emergency Freeze`, '127.0.0.1');
-        return;
-      }
+    // 1. Check Emergency Kill Switch Status
+    const settings = db.getSettings();
+    if (settings.killSwitchActive) {
+      setIsLoading(false);
+      setError('Emergency Lockout Active: System operations are frozen by administrative mandate.');
+      db.addSocEvent('critical', 'LOGIN_BLOCKED_FREEZE', `Login attempt on account ${username} blocked due to active Emergency Freeze`, '127.0.0.1');
+      return;
+    }
 
-      // 2. Check Honeytoken Decoy Intrusion Traps
-      if (username.toLowerCase() === 'backup_root' || username.toLowerCase() === 'database_root') {
-        setIsLoading(false);
-        setError('Access Denied: Security Node Mismatch.');
-        
-        // Dispatch intrusion logs
-        db.addAuditLog('honeytoken-trap', username, 'admin', 'HONEYTOKEN_ACCESS_ATTEMPT', `Decoy honeytoken account ${username} was targeted`, 'failure', 99);
-        db.addSocEvent('critical', 'INTRUSION_HONEYTOKEN', `Intrusion Alert: Decoy honeytoken account ${username} accessed from IP 127.0.0.1`, '127.0.0.1');
-        db.addFraudReport('suspicious_login', 99, `Honeypot Trap: Unauthorized access attempt on administrative daemon account: ${username}`);
-        return;
-      }
+    // 2. Check Honeytoken Decoy Intrusion Traps
+    if (username.toLowerCase() === 'backup_root' || username.toLowerCase() === 'database_root') {
+      setIsLoading(false);
+      setError('Access Denied: Security Node Mismatch.');
+      
+      // Dispatch intrusion logs
+      db.addAuditLog('honeytoken-trap', username, 'admin', 'HONEYTOKEN_ACCESS_ATTEMPT', `Decoy honeytoken account ${username} was targeted`, 'failure', 99);
+      db.addSocEvent('critical', 'INTRUSION_HONEYTOKEN', `Intrusion Alert: Decoy honeytoken account ${username} accessed from IP 127.0.0.1`, '127.0.0.1');
+      db.addFraudReport('suspicious_login', 99, `Honeypot Trap: Unauthorized access attempt on administrative daemon account: ${username}`);
+      return;
+    }
 
-      const users = db.getUsers();
-      const foundUser = users.find(u => u.username.toLowerCase() === username.toLowerCase() && u.role === role);
+    // 3. Call backend authentication
+    const result = await db.login(username, password, role);
+    setIsLoading(false);
 
-      // 3. Check Account Lockout Policy
-      if (foundUser && foundUser.lockedUntil) {
-        const lockTime = new Date(foundUser.lockedUntil).getTime();
-        if (lockTime > Date.now()) {
-          setIsLoading(false);
-          const minutesRemaining = Math.ceil((lockTime - Date.now()) / (60 * 1000));
-          setError(`Account locked due to 3 failed authorization attempts. Try again in ${minutesRemaining} minutes.`);
-          db.addAuditLog(foundUser.id, foundUser.name, foundUser.role, 'LOGIN_LOCKED_OUT', `Login blocked: account currently locked`, 'failure', 60);
-          return;
-        }
-      }
-
-      // 4. Validate Credentials
-      const user = users.find(u => u.username.toLowerCase() === username.toLowerCase() && u.password === hashPassword(password) && u.role === role);
-
+    if (result.success) {
+      const user = db.getCurrentUser();
       if (user) {
-        setIsLoading(false);
         setPendingUser(user);
 
-        // Reset failure counter on success
-        if (user.failedLoginAttempts || user.lockedUntil) {
-          const updatedUsers = users.map(u => {
-            if (u.id === user.id) {
-              return { ...u, failedLoginAttempts: 0, lockedUntil: undefined };
-            }
-            return u;
-          });
-          db.setUsers(updatedUsers);
-        }
-
-        // Check if user has an MPIN set up
-        if (!user.mpin) {
+        if (result.mustResetPassword) {
+          setLoginStage('must_reset_password');
+          setMpinInput('');
+          setMpinConfirm('');
+        } else if (!user.mpin) {
           setLoginStage('mpin_setup');
           setMpinInput('');
           setMpinConfirm('');
@@ -222,39 +203,11 @@ export default function Login({ navigate, onLoginSuccess }: LoginProps) {
           setLoginStage('mpin_entry');
           setMpinInput('');
         }
-      } else {
-        setIsLoading(false);
-        
-        // 5. Brute Force Protection (Staging failures)
-        if (foundUser) {
-          const newFailures = (foundUser.failedLoginAttempts || 0) + 1;
-          const updatedUsers = users.map(u => {
-            if (u.id === foundUser.id) {
-              const uUpdated = { ...u, failedLoginAttempts: newFailures };
-              if (newFailures >= 3) {
-                uUpdated.lockedUntil = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-                uUpdated.failedLoginAttempts = 0; // Reset counter for next cycle
-              }
-              return uUpdated;
-            }
-            return u;
-          });
-          db.setUsers(updatedUsers);
-
-          if (newFailures >= 3) {
-            setError('Account locked out for 15 minutes due to 3 failed authorization attempts.');
-            db.addSocEvent('high', 'ACCOUNT_LOCKOUT', `Brute Force Blocked: Account ${username} locked out after 3 failures`, '127.0.0.1');
-            db.addFraudReport('suspicious_login', 80, `Brute Force Prevention: Lockout active on user account: ${username}`);
-          } else {
-            setError(`Invalid username or password for this security level. Attempt ${newFailures} of 3.`);
-            db.addAuditLog(foundUser.id, foundUser.name, foundUser.role, 'LOGIN_FAILED', `Incorrect password input (Attempt ${newFailures} of 3)`, 'failure');
-          }
-        } else {
-          setError('Invalid username or password for this security level.');
-          db.addAuditLog('unknown', username, role, 'LOGIN_FAILED', 'Incorrect password key input', 'failure');
-        }
       }
-    }, 600);
+    } else {
+      setError(result.error || 'Invalid username or password.');
+      db.addAuditLog('unknown', username, role, 'LOGIN_FAILED', result.error || 'Incorrect password key input', 'failure');
+    }
   };
 
   // Triggered when completing first-time fingerprint anchoring enrollment
@@ -298,7 +251,7 @@ export default function Login({ navigate, onLoginSuccess }: LoginProps) {
     onLoginSuccess(finalUser);
   };
 
-  const handleMpinSetupSubmit = (e: React.FormEvent) => {
+  const handleMpinSetupSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
 
@@ -314,33 +267,65 @@ export default function Login({ navigate, onLoginSuccess }: LoginProps) {
 
     if (!pendingUser) return;
 
-    // Save hashed MPIN to database
-    const hashed = hashPassword(mpinInput);
-    const users = db.getUsers();
-    const updated = users.map(u => {
-      if (u.id === pendingUser.id) {
-        return {
-          ...u,
-          mpin: hashed
-        };
+    const success = await db.setupMpin(mpinInput);
+    if (success) {
+      db.addAuditLog(pendingUser.id, pendingUser.name, pendingUser.role, 'MPIN_SETUP_COMPLETED', 'Configured secure 6-digit MPIN for identity authorization', 'success');
+
+      const updatedUser = { ...pendingUser, mpin: 'enrolled' };
+      setPendingUser(updatedUser);
+
+      // If fingerprint anchoring is required (admin first time)
+      if (updatedUser.fingerprintStatus === 'pending') {
+        setLoginStage('anchoring_fingerprint');
+        setScanMessage('Secure MPIN registered. Please place finger on Mantra MFS100 scanner to anchor fingerprint biometric.');
+      } else {
+        // Proceed to login success
+        db.addAuditLog(updatedUser.id, updatedUser.name, updatedUser.role, 'USER_LOGIN', 'Session authorized successfully via Password + MPIN setup', 'success');
+        onLoginSuccess(updatedUser);
       }
-      return u;
-    });
-
-    db.setUsers(updated);
-    db.addAuditLog(pendingUser.id, pendingUser.name, pendingUser.role, 'MPIN_SETUP_COMPLETED', 'Configured secure 6-digit MPIN for identity authorization', 'success');
-
-    const updatedUser = updated.find(u => u.id === pendingUser.id)!;
-    setPendingUser(updatedUser);
-
-    // If fingerprint anchoring is required (admin first time)
-    if (updatedUser.fingerprintStatus === 'pending') {
-      setLoginStage('anchoring_fingerprint');
-      setScanMessage('Secure MPIN registered. Please place finger on Mantra MFS100 scanner to anchor fingerprint biometric.');
     } else {
-      // Proceed to login success
-      db.addAuditLog(updatedUser.id, updatedUser.name, updatedUser.role, 'USER_LOGIN', 'Session authorized successfully via Password + MPIN setup', 'success');
-      onLoginSuccess(updatedUser);
+      setError('Failed to setup MPIN.');
+    }
+  };
+
+  const handleForceResetSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+
+    if (mpinInput.length < 6) {
+      setError('Password must be at least 6 characters.');
+      return;
+    }
+
+    if (mpinInput !== mpinConfirm) {
+      setError('Passwords do not match.');
+      return;
+    }
+
+    if (!pendingUser) return;
+
+    const success = await db.resetPassword(pendingUser.username, pendingUser.role, mpinInput);
+    if (success) {
+      // Re-login automatically with the new password
+      const result = await db.login(pendingUser.username, mpinInput, pendingUser.role);
+      if (result.success) {
+        const user = db.getCurrentUser();
+        if (user) {
+          setPendingUser(user);
+          if (!user.mpin) {
+            setLoginStage('mpin_setup');
+            setMpinInput('');
+            setMpinConfirm('');
+          } else {
+            setLoginStage('mpin_entry');
+            setMpinInput('');
+          }
+        }
+      } else {
+        setError('Password reset completed but login failed.');
+      }
+    } else {
+      setError('Failed to update password.');
     }
   };
 
@@ -801,6 +786,61 @@ export default function Login({ navigate, onLoginSuccess }: LoginProps) {
                   Cancel & Reset
                 </button>
               </div>
+            </div>
+          )}
+
+          {/* Stage: Forced Password Reset */}
+          {loginStage === 'must_reset_password' && pendingUser && (
+            <div className="space-y-5 animate-fadeIn">
+              <div className="text-center space-y-1">
+                <h3 className="text-sm font-bold text-white uppercase tracking-widest flex items-center justify-center gap-2">
+                  <Lock className="w-4 h-4 text-indigo-400" />
+                  Password Change Required
+                </h3>
+                <p className="text-2xs text-slate-400">
+                  You are logging in for the first time. Please set a new security passkey.
+                </p>
+              </div>
+
+              {error && (
+                <div className="p-3 bg-rose-500/10 border border-rose-500/20 rounded-xl text-xs text-rose-400 font-semibold">
+                  {error}
+                </div>
+              )}
+
+              <form onSubmit={handleForceResetSubmit} className="space-y-4">
+                <div className="space-y-1.5">
+                  <label className="block text-2xs font-bold text-slate-500 uppercase tracking-widest">New Password</label>
+                  <input
+                    type="password"
+                    required
+                    placeholder="Enter new password"
+                    value={mpinInput}
+                    onChange={(e) => setMpinInput(e.target.value)}
+                    className="w-full px-4 py-2.5 glass-input text-sm text-slate-200"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="block text-2xs font-bold text-slate-500 uppercase tracking-widest">Confirm Password</label>
+                  <input
+                    type="password"
+                    required
+                    placeholder="Confirm new password"
+                    value={mpinConfirm}
+                    onChange={(e) => setMpinConfirm(e.target.value)}
+                    className="w-full px-4 py-2.5 glass-input text-sm text-slate-200"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-3 bg-gradient-to-r from-primary to-secondary hover:from-primary-light hover:to-secondary-light text-white font-semibold rounded-xl transition-all shadow-lg flex items-center justify-center gap-1.5 animate-pulse"
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  Update Passkey & Proceed
+                </button>
+              </form>
             </div>
           )}
 

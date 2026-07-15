@@ -199,8 +199,8 @@ export default function SecurityControls({ navigate }: SecurityControlsProps) {
       setTimeout(() => {
         setRotationLogs(prev => [...prev, '[MIGRATION] Re-encrypting 8 users & 3 certificates using simulated AES-256-GCM...']);
         
-        setTimeout(() => {
-          const rot = db.rotateDatabaseKeys();
+        setTimeout(async () => {
+          const rot = await db.rotateDatabaseKeys();
           if (rot.success) {
             setRotationLogs(prev => [
               ...prev,

@@ -1,183 +1,69 @@
 # 🛡️ AegisCert
 
-<div align="center">
+AegisCert is an Enterprise Digital Trust Platform designed to secure the complete lifecycle of academic credentials—from **issuance** and **storage** to **verification** and **long-term authenticity**.
 
-# **AegisCert**
-### **Protecting Academic Trust**
-
-**A Secure Academic Credential Platform**
-
-*An Enterprise Digital Trust Platform for Secure Academic Credential Management*
+The platform integrates **Blockchain**, **Enterprise Security**, **Artificial Intelligence**, and **Biometric Authentication** to create a trusted environment for degree management.
 
 ---
 
-AegisCert is a modern platform that enables educational institutions to issue, manage, protect, and verify academic credentials through a secure and intelligent digital ecosystem.
+## 🏗️ Getting Started
 
-</div>
+### Prerequisites
+- Node.js (v18 or higher recommended)
+- npm (v9 or higher)
 
----
-
-## 📖 Overview
-
-**AegisCert** is an Enterprise Digital Trust Platform designed to secure the complete lifecycle of academic credentials—from **issuance** and **storage** to **verification** and **long-term authenticity**.
-
-The platform integrates **Blockchain**, **Enterprise Security**, **Artificial Intelligence**, and **Biometric Authentication** to create a trusted environment where academic credentials can be issued and verified with confidence.
-
-Its objective is to reduce certificate fraud, strengthen institutional trust, simplify verification for employers, and provide students with secure digital ownership of their academic records.
-
----
-
-## 🎯 Vision
-
-> To establish a trusted digital ecosystem where every academic credential is secure, verifiable, tamper-resistant, and globally trusted.
+### Environment Configuration
+Copy the configuration template to create your local variables:
+```bash
+cp .env.example .env
+```
+Fill in the details:
+- **`VITE_SUPABASE_URL`** & **`VITE_SUPABASE_ANON_KEY`**: Set these to connect to the production PostgreSQL layer.
+- **`JWT_SECRET`**: Secure signing key for backend authorization tokens (Express).
 
 ---
 
-## 🚀 Objectives
+## 🚀 Running the Application
 
-- Secure academic credential lifecycle management.
-- Eliminate certificate forgery and tampering.
-- Provide instant and trusted verification.
-- Strengthen digital identity through biometrics.
-- Deliver enterprise-grade cybersecurity for educational institutions.
+### 1. Installation
+Install project dependencies for both the frontend client and the Express backend:
+```bash
+npm install
+```
 
----
+### 2. Local Development Mode
+Runs the concurrent Vite frontend server (port 5173) and Express SQLite backend gateway (port 5000):
+```bash
+npm run dev
+```
 
-# ✨ Core Features
-
-### 🔐 Enterprise Security
-- Role-Based Access Control (RBAC)
-- Multi-Factor Authentication
-- OTP Verification
-- Encrypted Data Storage
-- Secure Session Management
-
-### ⛓️ Blockchain Verification
-- Immutable certificate records
-- Cryptographic integrity validation
-- Tamper detection
-- Trusted verification workflow
-
-### 👤 Biometric Authentication
-- Face liveness verification
-- Fingerprint authentication (Mantra MFS100 Ready)
-- Multi-factor identity verification
-
-### 🤖 AI-Powered Security
-- Fraud detection
-- Security monitoring
-- Intelligent risk analysis
-- Anomaly detection
-
-### 💳 Digital Credential Management
-- Secure credential storage
-- Digital credential wallet
-- QR-based verification
-- Academic record management
-
-### 📊 Enterprise Monitoring
-- Security Operations Center (SOC)
-- Audit logging
-- Activity monitoring
-- System health dashboard
-
----
-
-# 🏗️ System Architecture
-
-```text
-Users
-│
-├── Students
-├── Institutions
-├── Verifiers
-└── Administrators
-        │
-        ▼
- Authentication & Biometrics
-        │
-        ▼
- Certificate Management
-        │
-        ├── Blockchain Layer
-        ├── AI Security Engine
-        └── Audit System
-                │
-                ▼
-        Encrypted Database
+### 3. Production Deployment Build
+Compile TypeScript code and assemble optimized production assets:
+```bash
+npm run build
 ```
 
 ---
 
-# 🛠️ Technology Stack
+## 🧪 Testing and Linting
 
-| Category | Technologies |
-|-----------|--------------|
-| Frontend | React, TypeScript, Tailwind CSS |
-| Backend | Node.js, Express.js |
-| Security | AES-256, RSA-4096, JWT, BCrypt, SHA-256 |
-| Blockchain | Blockchain Ledger Simulation |
-| Biometrics | Face Authentication, Mantra MFS100 Integration |
-| AI | Fraud Detection & Security Analytics |
+We use **Vitest** for unit testing core cryptographic services, and **ESLint** for code quality checks.
 
----
-
-# 👥 User Roles
-
-| Role | Responsibilities |
-|------|------------------|
-| Super Admin | Platform administration and security management |
-| Institution Admin | Certificate issuance and student management |
-| Student | Access and manage digital credentials |
-| Verifier | Verify academic credentials securely |
+- **Run Unit Tests**:
+  ```bash
+  npm run test
+  ```
+- **Run Linting Rules**:
+  ```bash
+  npm run lint
+  ```
 
 ---
 
-# 🔒 Security Highlights
+## 🔒 Security Specifications
 
-- Enterprise-grade authentication
-- Blockchain-backed integrity verification
-- Biometric identity validation
-- End-to-end encryption
-- Comprehensive audit logging
-- AI-assisted fraud detection
-
----
-
-# 📈 Future Roadmap
-
-- Multi-University Federation
-- AI Document Intelligence
-- Enterprise API Gateway
-- Executive Analytics Dashboard
-- Progressive Web Application (PWA)
-- Cloud Deployment
-- Smart Contract Integration
-
----
-
-# 🤝 Contributing
-
-Contributions, feature suggestions, and improvements are welcome. Feel free to fork the repository, raise issues, or submit pull requests.
-
----
-
-# 📄 License
-
-This repository is intended for educational, research, and demonstration purposes.
-
----
-
-<div align="center">
-
-## 🛡️ AegisCert
-
-### **Protecting Academic Trust**
-
-**A Secure Academic Credential Platform**
-
-Building the future of trusted digital academic credentials.
-
-⭐ If you find this project useful, consider giving it a **Star**.
-
-</div>
+Refer to [ARCHITECTURE.md](file:///d:/Certificate_verification/ARCHITECTURE.md) for full descriptions of:
+- AES-GCM at-rest database cache encryption.
+- Multi-factor MPIN & biometric anchoring protocols.
+- Server-side brute force lockout policies.
+- Decoy honeytoken alert traps.

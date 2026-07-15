@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { db, User, initializeDbConnection } from './services/db';
 
 // Import Pages
@@ -66,22 +67,15 @@ import DashboardLayout from './components/DashboardLayout';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [currentRoute, setCurrentRoute] = useState<string>('landing');
+  const location = useLocation();
+  const rNavigate = useNavigate();
+  
+  // Extract base route (e.g. /verification?id=CERT-2810 -> verification)
+  const pathname = location.pathname.substring(1) || 'landing';
+  const currentRoute = pathname.includes('?') ? pathname.split('?')[0] : pathname;
+
   const [showSessionWarning, setShowSessionWarning] = useState(false);
   const [sessionTimeLeft, setSessionTimeLeft] = useState(60);
-
-  // Sync route based on URL Hash
-  const syncRoute = () => {
-    const hash = window.location.hash || '#landing';
-    
-    // Extract base route (e.g. #verification?id=CERT-2810 -> verification)
-    let route = hash.replace('#', '');
-    if (route.includes('?')) {
-      route = route.split('?')[0];
-    }
-    
-    setCurrentRoute(route || 'landing');
-  };
 
   useEffect(() => {
     // Start backend connection sync
@@ -92,14 +86,15 @@ export default function App() {
         setCurrentUser(user);
       }
     });
-
-    syncRoute();
-    window.addEventListener('hashchange', syncRoute);
-    return () => window.removeEventListener('hashchange', syncRoute);
   }, []);
 
   const navigate = (route: string) => {
-    window.location.hash = route;
+    const cleanRoute = route.replace('#', '');
+    if (cleanRoute.startsWith('/')) {
+      rNavigate(cleanRoute);
+    } else {
+      rNavigate('/' + cleanRoute);
+    }
   };
 
   const handleLoginSuccess = (user: User) => {
